@@ -206,21 +206,32 @@ def extraer_claves_entidad(corte: str, bo_code: str, b_up: str) -> list[str]:
             claves.append(f"{corte}|{bo_code}|DOC:{bol}")
     return claves
 
-def calcular_falta_admin_tramitada(b_up: str) -> int:
-    tiene_falta_real = bool(re.search(
-        r"\b(?:INDOCUMENTADO|NO\s+PORTABA\s+C[ÉE]DULA|SIN\s+DOCUMENTO|ESTAD[ÍI]A\s+VENCIDA|FALTA\s+ADMINISTRATIVA|FALTA\s+MIGRATORIA|ACTA\s+DE\s+INSPECCI[ÓO]N\s+SANITARIA|BOLETA\s+DE\s+CITACI[ÓO]N|C\.?V\.?I\.?|ETRM|TRAMITE\s+MIGRATORIO)\b",
-        b_up
-    ))
-    if not tiene_falta_real:
-        return 0
-    if "SIN NOVEDAD" in b_up and not re.search(
-        r"\b(?:TRAMITAD[OA]|REMITID[OA]|CONDUCID[OA]|APREHENDID[OA]|SANCIONAD[OA]|ESTAD[ÍI]A\s+VENCIDA|INDOCUMENTADO|NO\s+PORTABA)\b",
+def calcular_oficios_preciso(b_up: str) -> int:
+    if re.search(
+        r"\b(?:OFICIO[S]?\s+(?:DE\s+)?(?:CONDUCCI[ÓO]N|CAPTURA|SUBROGADO|CITACI[ÓO]N|JUDICIAL)|"
+        r"CONDUCCI[ÓO]N\s+JUDICIAL|CAPTURA\s+JUDICIAL|ORDEN\s+DE\s+CAPTURA|BOLETA\s+DE\s+CAPTURA|"
+        r"CINTILLO\s+ROJO|APREHENSI[ÓO]N\s+POR\s+OFICIO|SOLICITAD[OA]\s+POR\s+(?:JUZGADO|FISCAL[ÍI]A|JUEZ))\b",
         b_up
     ):
-        return 0
-    return 1
+        return 1
+    return 0
 
-def calcular_infracciones_exactas(b_up: str, b_mask: str) -> int:
+def calcular_faltas_preciso(b_up: str) -> int:
+    if re.search(
+        r"\b(?:INDOCUMENTADO|NO\s+PORTABA\s+C[ÉE]DULA|ESTAD[ÍI]A\s+VENCIDA|"
+        r"FALTA\s+ADMINISTRATIVA|FALTA\s+MIGRATORIA|TR[ÁA]MITE\s+MIGRATORIO|"
+        r"ACTA\s+DE\s+INSPECCI[ÓO]N\s+SANITARIA|BOLETA\s+DE\s+CITACI[ÓO]N|C\.?V\.?I\.?|ETRM)\b",
+        b_up
+    ):
+        if "SIN NOVEDAD" in b_up and not re.search(
+            r"\b(?:ESTAD[ÍI]A\s+VENCIDA|INDOCUMENTADO|NO\s+PORTABA|TRAMITAD[OA]|REMITID[OA]|CONDUCID[OA]|SANCIONAD[OA])\b",
+            b_up
+        ):
+            return 0
+        return 1
+    return 0
+
+def calcular_infracciones_preciso(b_up: str, b_mask: str) -> int:
     if re.search(r"(?:INFRACCI[ÓO]N(?:ES)?\s*(?:DE\s+TR[ÁA]NSITO)?|BOLETAS?|SANCIONES?)\s*[:=\s(-]*0+\b", b_mask):
         return 0
 
@@ -234,7 +245,11 @@ def calcular_infracciones_exactas(b_up: str, b_mask: str) -> int:
         return max(cantidades)
 
     if re.search(
-        r"\b(?:SE\s+COLOCA(?:RON)?\s+INFRACCI|SE\s+REALIZA(?:N)?\s+(?:UNA\s+)?(?:INFRACCI|BOLETA)|SE\s+SANCION|ES\s+SANCION|BOLETA\s+DE\s+INFRACCI|INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|SE\s+LE\s+RETIRA\s+LICENCIA|SE\s+LE\s+RETIENE\s+LICENCIA|EMBRIAGUEZ\s+COMPROBADA|NO\s+PORTABA\s+LICENCIA|LICENCIA\s+VENCIDA|DESACATO|VIDRIOS\s+AHUMADOS|GIRO\s+INDEBIDO)\b",
+        r"\b(?:SE\s+COLOCA(?:RON)?\s+INFRACCI|SE\s+REALIZA(?:N)?\s+(?:UNA\s+)?(?:INFRACCI|BOLETA)|"
+        r"SE\s+SANCION|ES\s+SANCION|BOLETA\s+DE\s+INFRACCI|INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|"
+        r"SE\s+LE\s+RETIRA\s+LICENCIA|SE\s+LE\s+RETIENE\s+LICENCIA|EMBRIAGUEZ\s+COMPROBADA|"
+        r"NO\s+PORTABA\s+LICENCIA|LICENCIA\s+VENCIDA|DESACATO|VIDRIOS\s+AHUMADOS|GIRO\s+INDEBIDO|"
+        r"CINTA\s+REFLECTIVA|LUCES\s+(?:INADECUADAS|DEFECTUOSAS))\b",
         b_up
     ):
         return 1
@@ -294,12 +309,8 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
         for k in claves_ent:
             entidades_vistas.add(k)
 
-        oficios = 1 if any(k in b_up for k in [
-            "OFICIO DE CONDUCCI", "OFICIO DE CAPTURA", "OFICIO JUDICIAL", "OFICIO DE SUBROGADO",
-            "CONDUCCI[ÓO]N JUDICIAL", "APREHENSI[ÓO]N POR OFICIO", "CINTILLO ROJO", "OFICIO N"
-        ]) else 0
-
-        faltas_admin = calcular_falta_admin_tramitada(b_up)
+        oficios = calcular_oficios_preciso(b_up)
+        faltas_admin = calcular_faltas_preciso(b_up)
 
         m_grua_cnt = re.search(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A)\s*[:=\s-]*(\d{1,2})\b", b_mask)
         if m_grua_cnt:
@@ -309,10 +320,12 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
         else:
             gruas = 0
 
-        infracciones = calcular_infracciones_exactas(b_up, b_mask)
+        infracciones = calcular_infracciones_preciso(b_up, b_mask)
 
-        if infracciones == 1 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
-            firma_sem = f"{corte}|{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_mask[:80])}"
+        # Solo deduplica semánticamente si NO tiene placa, cédula ni oficio
+        if infracciones == 1 and oficios == 0 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
+            cuerpo_sin_ts = re.sub(r"\[TS\]|\[FECHA\]|\[HORA\]|\[COD\]", "", b_mask)
+            firma_sem = f"{corte}|{bo_code}|{calcular_huella_exacta(cuerpo_sin_ts)}"
             if firma_sem in semantica_sin_id:
                 stats["duplicados_semanticos"] += 1
                 infracciones = 0
