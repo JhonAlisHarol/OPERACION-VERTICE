@@ -1,25 +1,4 @@
-import os
-import zipfile
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.chart import BarChart, Reference
-
-# 1. Regenerate the clean, audited 24-hour Excel workbook (130 real unique tickets: 72 PN + 58 SENAFRONT)
-# Breakdown by block:
-# - Bloque 1 (06:00-11:59): 14 (9 SNF + 5 PN)
-# - Bloque 2 (12:00-17:25): 72 (52 PN + 20 SNF) -> adjusted Metetí Falta #10 duplicate (-1)
-# - Bloque 3 (17:26-23:59): 41 (15 PN + 26 SNF) -> adjusted Metetí 53D duplicate (-1) & Agua Fría summary (-1)
-# - Bloque 4 (00:00-06:00): 3 (0 PN + 3 SNF) -> adjusted Paso Canoas shift summary (-3 already itemized in B3)
-# Total = 14 + 72 + 41 + 3 = 130 unique tickets (72 PN + 58 SNF)!
-
-# Also update app.py in repo_vertice_v3 to add smart deduplication for:
-# 1) Generic status messages without ticket numbers ("nos mantenemos realizando boleta...")
-# 2) Shift summaries ("TURNO DE 1800 A 0600 HORAS... Infracción de tránsito: (03)") when individual tickets from that post exist
-# 3) Near-duplicate reworded lines in the same BO ("Se realiza una boleta artículo #53D por luces defectuosas" vs "Se realiza una boleta artículo #53D, luces defectuosas")
-
-os.makedirs("repo_vertice_v3/.streamlit", exist_ok=True)
-
-app_py_v3 = '''import re
+import re
 import io
 from datetime import datetime
 import pandas as pd
@@ -66,7 +45,7 @@ def detectar_institucion(bo_code: str, texto: str) -> str:
 
 def detectar_bloque_horario(texto: str) -> str:
     t_up = texto.upper()
-    m_mil = re.search(r"\\b(\\d{2})(\\d{2})(\\d{2})NOV\\d{2}\\b", t_up)
+    m_mil = re.search(r"\b(\d{2})(\d{2})(\d{2})NOV\d{2}\b", t_up)
     if m_mil:
         dia, hh, mm = int(m_mil.group(1)), int(m_mil.group(2)), int(m_mil.group(3))
         mins = hh * 60 + mm
@@ -79,7 +58,7 @@ def detectar_bloque_horario(texto: str) -> str:
         else:
             return "Bloque 3 (17:26-23:59)"
 
-    m_hm = re.search(r"(?:HORA[S]?:?|A LAS)\\s*(\\d{1,2}):(\\d{2})", t_up)
+    m_hm = re.search(r"(?:HORA[S]?:?|A LAS)\s*(\d{1,2}):(\d{2})", t_up)
     if m_hm:
         hh, mm = int(m_hm.group(1)), int(m_hm.group(2))
         if ("P.M." in t_up or "PM" in t_up) and hh < 12:
@@ -126,7 +105,7 @@ def clasificar_tipo_falta_transito(texto_up: str) -> str:
     return "Otras Infracciones Reglamento"
 
 def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> pd.DataFrame:
-    bloques = re.split(r"(?=\\bBO-\\d+-)", texto_crudo.strip())
+    bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
     registros = []
     vistos = set()
     huellas_boletas = set()
@@ -137,24 +116,24 @@ def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> 
             continue
 
         # 1. Deduplicación exacta del mensaje
-        huella = re.sub(r"\\s+", " ", b.lower()).strip()
+        huella = re.sub(r"\s+", " ", b.lower()).strip()
         if huella in vistos:
             continue
         vistos.add(huella)
 
         lineas = [l.strip() for l in b.splitlines() if l.strip()]
         encabezado = lineas[0]
-        m_bo = re.match(r"^(BO-\\d+)\\s*-\\s*([^\\n]+)", encabezado)
+        m_bo = re.match(r"^(BO-\d+)\s*-\s*([^\n]+)", encabezado)
         bo_code = m_bo.group(1) if m_bo else "BO-S/N"
         punto_control = encabezado
 
-        cuerpo = "\\n".join(lineas[1:])
+        cuerpo = "\n".join(lineas[1:])
         institucion = detectar_institucion(bo_code, b)
         bloque = detectar_bloque_horario(b)
         b_up = b.upper()
 
         # Ignorar mensajes genéricos de estatus sin cifra ni detalle ("nos mantenemos realizando boleta...")
-        es_rutina_generica = bool(re.search(r"NOS MANTENEMOS\\s+(?:EN\\s+LA\\s+)?REALIZANDO\\s+(?:UNA\\s+)?BOLETA", b_up)) and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C[ÉE]DULA|C\\.I\\.P|N°\\s*\\d+|#\\d+)", b_up)
+        es_rutina_generica = bool(re.search(r"NOS MANTENEMOS\s+(?:EN\s+LA\s+)?REALIZANDO\s+(?:UNA\s+)?BOLETA", b_up)) and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C[ÉE]DULA|C\.I\.P|N°\s*\d+|#\d+)", b_up)
         if ignorar_mensajes_rutina and es_rutina_generica:
             continue
 
@@ -203,28 +182,28 @@ def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> 
             faltas_admin = 1
 
         # Remoción en grúa
-        m_grua = re.search(r"REMOCI[ÓO]N\\s+EN\\s+GR[ÚU]A\\s*[:=.-]*\\s*(\\d+)", b_up)
+        m_grua = re.search(r"REMOCI[ÓO]N\s+EN\s+GR[ÚU]A\s*[:=.-]*\s*(\d+)", b_up)
         if m_grua:
             gruas = int(m_grua.group(1))
         elif any(k in b_up for k in ["GRÚA", "GRUA", "REMOVIDO EN GRÚA", "REMOVIDO EN GRUA", "VEHÍCULO EN GRÚA", "VEHICULO EN GRUA"]):
             gruas = 1
 
         # Armas verificadas con permiso
-        m_arma = re.search(r"ARMA\\s+CON\\s+PERMISO\\s*[:=.-]*\\s*(\\d+)", b_up)
+        m_arma = re.search(r"ARMA\s+CON\s+PERMISO\s*[:=.-]*\s*(\d+)", b_up)
         if m_arma:
             armas_verif = int(m_arma.group(1))
         elif "ARMA DE FUEGO" in b_up or "PERMISO DE PORTE" in b_up:
             armas_verif = 1
 
         # Personas verificadas
-        m_pers = re.findall(r"(?:PERSONAS(?:\\s+VERIFICADAS)?|CIUDADANOS(?:\\s+NACIONALES|\\s+EXTRANJEROS)?)\\s*[:=.-]*\\s*(\\d+)", b_up)
+        m_pers = re.findall(r"(?:PERSONAS(?:\s+VERIFICADAS)?|CIUDADANOS(?:\s+NACIONALES|\s+EXTRANJEROS)?)\s*[:=.-]*\s*(\d+)", b_up)
         if m_pers:
             personas = sum(int(x) for x in m_pers)
         elif any(k in b_up for k in ["PERSONA VERIFICADA", "CIUDADANO VERIFICADO"]) or categoria in ("Solicitado / Oficio", "Falta Administrativa / Identidad"):
             personas = 1
 
         # Vehículos verificados
-        m_veh = re.findall(r"(?:VEH[ÍI]CULOS(?:\\s+PARTICULARES|\\s+NACIONALES|\\s+EXTRANJEROS)?|TAXIS?|BUSES?|MOTOS?|CAMI[ÓO]N(?:ES)?|VOLQUETES?|ARTICULADOS?|MULAS?)\\s*[:=.-]*\\s*(\\d+)", b_up)
+        m_veh = re.findall(r"(?:VEH[ÍI]CULOS(?:\s+PARTICULARES|\s+NACIONALES|\s+EXTRANJEROS)?|TAXIS?|BUSES?|MOTOS?|CAMI[ÓO]N(?:ES)?|VOLQUETES?|ARTICULADOS?|MULAS?)\s*[:=.-]*\s*(\d+)", b_up)
         if m_veh:
             vehiculos = sum(int(x) for x in m_veh)
         elif any(k in b_up for k in ["PLACA", "MATRÍCULA", "MATRICULA"]) or gruas > 0:
@@ -234,8 +213,8 @@ def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> 
         if "INFRACCIÓN DE TRÁNSITO (00)" in b_up or "INFRACCION DE TRANSITO (00)" in b_up or "BOLETAS PUESTAS POR LA UNIDAD DEL TRÁNSITO 0" in b_up:
             boletas = 0
         else:
-            m_bol = re.search(r"(\\d+)\\s*(?:BOLETAS|INFRACCIONES)", b_up)
-            m_bol_rev = re.search(r"(?:BOLETAS|INFRACCIONES\\s+DE\\s+TR[ÁA]NSITO)\\s*[:=.-]*\\s*(\\d+)", b_up)
+            m_bol = re.search(r"(\d+)\s*(?:BOLETAS|INFRACCIONES)", b_up)
+            m_bol_rev = re.search(r"(?:BOLETAS|INFRACCIONES\s+DE\s+TR[ÁA]NSITO)\s*[:=.-]*\s*(\d+)", b_up)
             if m_bol_rev:
                 boletas = int(m_bol_rev.group(1))
             elif m_bol:
@@ -244,9 +223,9 @@ def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> 
                 boletas = 1
 
         # Deduplicación semántica de boletas repetidas con distinta redacción en el mismo punto
-        m_doc = re.search(r"(?:C\\.I\\.P\\.?|C[ÉE]DULA|PASAPORTE|RUEX)\\s*[:=.-]*\\s*([A-Z0-9-]+)", b_up)
+        m_doc = re.search(r"(?:C\.I\.P\.?|C[ÉE]DULA|PASAPORTE|RUEX)\s*[:=.-]*\s*([A-Z0-9-]+)", b_up)
         doc_id = m_doc.group(1) if m_doc else "N/A"
-        m_placa = re.search(r"(?:PLACA|MATR[ÍI]CULA|MATRICULA)\\s*[:=.-]*\\s*([A-Z0-9-]+)", b_up)
+        m_placa = re.search(r"(?:PLACA|MATR[ÍI]CULA|MATRICULA)\s*[:=.-]*\s*([A-Z0-9-]+)", b_up)
         placa = m_placa.group(1) if m_placa else "N/A"
 
         if boletas == 1 and doc_id == "N/A" and placa == "N/A":
@@ -538,7 +517,7 @@ with tab_proc:
     texto_input = st.text_area(
         "Pega aquí los reportes operativos crudos (WhatsApp / Telegram / PDF):",
         height=240,
-        placeholder="- BO-53-Chepo (Entrada principal)\\n*3RA BRIGADA PANAMÁ ESTE/ BAT-CHEPO*..."
+        placeholder="- BO-53-Chepo (Entrada principal)\n*3RA BRIGADA PANAMÁ ESTE/ BAT-CHEPO*..."
     )
 
     if st.button("⚙️ Procesar Reportes y Actualizar Presentación", type="primary"):
@@ -621,27 +600,3 @@ with tab_dash:
             (df_res["Armas Verificadas"] > 0)
         ][["Bloque Horario", "Institución", "Punto de Control", "Categoría", "Tipo / Detalle de Falta", "Documento / C.I.P.", "Placa", "Narrativa Operativa"]]
         st.dataframe(df_relevante, use_container_width=True, hide_index=True)
-'''
-
-reqs = "streamlit>=1.38.0\npandas>=2.2.0\nopenpyxl>=3.1.2\n"
-config_toml = '[theme]\nprimaryColor = "#1B365D"\nbackgroundColor = "#FFFFFF"\nsecondaryBackgroundColor = "#F4F7FA"\ntextColor = "#1A202C"\nfont = "sans serif"\n'
-readme_md = "# Operación Vértice — Consola Operativa (CON-C5)\n\nAplicación Streamlit lista para GitHub y Streamlit Cloud con filtro estricto anti-duplicados de boletas y presentación ejecutiva.\n"
-
-with open("repo_vertice_v3/app.py", "w", encoding="utf-8") as f:
-    f.write(app_py_v3)
-with open("repo_vertice_v3/requirements.txt", "w", encoding="utf-8") as f:
-    f.write(reqs)
-with open("repo_vertice_v3/.streamlit/config.toml", "w", encoding="utf-8") as f:
-    f.write(config_toml)
-with open("repo_vertice_v3/README.md", "w", encoding="utf-8") as f:
-    f.write(readme_md)
-
-zip_v3 = "Operacion_Vertice_GitHub_Streamlit_v3.zip"
-with zipfile.ZipFile(zip_v3, "w", zipfile.ZIP_DEFLATED) as zf:
-    for root, _, files in os.walk("repo_vertice_v3"):
-        for file in files:
-            full_path = os.path.join(root, file)
-            rel_path = os.path.relpath(full_path, "repo_vertice_v3")
-            zf.write(full_path, rel_path)
-
-print("Saved v3 zip:", zip_v3)
