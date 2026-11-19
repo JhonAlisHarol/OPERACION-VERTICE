@@ -207,11 +207,9 @@ def extraer_claves_entidad(corte: str, bo_code: str, b_up: str) -> list[str]:
     return claves
 
 def segmentar_narrativos(texto_crudo: str) -> list[str]:
-    """Separa reportes en bloques BO- o narrativos encabezados por hora militar / brigada / punto de control."""
     texto_limpio = texto_crudo.strip()
     if not texto_limpio:
         return []
-    # Si contiene códigos BO-, divide por cada BO-; si es narrativa suelta, divide por timestamps militares o líneas de encabezado
     if re.search(r"\bBO-\d+-", texto_limpio):
         return [b.strip() for b in re.split(r"(?=\bBO-\d+-)", texto_limpio) if b.strip()]
     partes = re.split(r"(?=\b\d{6}NOV\d{2,4}\b|\n\s*(?:Otros\b|BO-\d+))", texto_limpio)
@@ -220,8 +218,10 @@ def segmentar_narrativos(texto_crudo: str) -> list[str]:
 def calcular_oficios_preciso(b_up: str) -> int:
     if re.search(
         r"\b(?:OFICIO[S]?\s+(?:DE\s+)?(?:CONDUCCI[ÓO]N|CAPTURA|SUBROGADO|CITACI[ÓO]N|JUDICIAL)|"
-        r"CONDUCCI[ÓO]N\s+JUDICIAL|CAPTURA\s+JUDICIAL|ORDEN\s+DE\s+CAPTURA|BOLETA\s+DE\s+CAPTURA|"
-        r"CINTILLO\s+ROJO|APREHENSI[ÓO]N\s+POR\s+OFICIO|SOLICITAD[OA]\s+POR\s+(?:JUZGADO|FISCAL[ÍI]A|JUEZ))\b",
+        r"CONDUCCI[ÓO]N\s+JUDICIAL|CAPTURA\s+JUDICIAL|ORDEN\s+(?:DE\s+)?(?:CAPTURA|CONDUCCI[ÓO]N|ARRESTO)|"
+        r"BOLETA\s+DE\s+CAPTURA|CINTILLO\s+ROJO|APREHENSI[ÓO]N\s+POR\s+OFICIO|"
+        r"SOLICITAD[OA]\s+POR\s+(?:JUZGADO|FISCAL[ÍI]A|JUEZ|AUTORIDAD)|"
+        r"PENDIENTE\s+(?:DE\s+)?CAPTURA|CONDUCID[OA]\s+POR\s+(?:JUZGADO|FISCAL[ÍI]A|PDA))\b",
         b_up
     ):
         return 1
