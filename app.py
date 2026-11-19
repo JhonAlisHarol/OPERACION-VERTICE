@@ -206,6 +206,17 @@ def extraer_claves_entidad(corte: str, bo_code: str, b_up: str) -> list[str]:
             claves.append(f"{corte}|{bo_code}|DOC:{bol}")
     return claves
 
+def segmentar_narrativos(texto_crudo: str) -> list[str]:
+    """Separa reportes en bloques BO- o narrativos encabezados por hora militar / brigada / punto de control."""
+    texto_limpio = texto_crudo.strip()
+    if not texto_limpio:
+        return []
+    # Si contiene códigos BO-, divide por cada BO-; si es narrativa suelta, divide por timestamps militares o líneas de encabezado
+    if re.search(r"\bBO-\d+-", texto_limpio):
+        return [b.strip() for b in re.split(r"(?=\bBO-\d+-)", texto_limpio) if b.strip()]
+    partes = re.split(r"(?=\b\d{6}NOV\d{2,4}\b|\n\s*(?:Otros\b|BO-\d+))", texto_limpio)
+    return [p.strip() for p in partes if p.strip()]
+
 def calcular_oficios_preciso(b_up: str) -> int:
     if re.search(
         r"\b(?:OFICIO[S]?\s+(?:DE\s+)?(?:CONDUCCI[ÓO]N|CAPTURA|SUBROGADO|CITACI[ÓO]N|JUDICIAL)|"
@@ -228,6 +239,17 @@ def calcular_faltas_preciso(b_up: str) -> int:
             b_up
         ):
             return 0
+        return 1
+    return 0
+
+def calcular_gruas_preciso(b_up: str, b_mask: str) -> int:
+    m_grua_n = re.findall(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDOS?\s+EN\s+GR[ÚU]A|GR[ÚU]AS?)\s*[:=\s-]*(\d{1,2})\b", b_mask)
+    m_grua_pre = re.findall(r"\b(\d{1,2})\s*(?:VEH[ÍI]CULOS?\s+)?(?:REMOVIDOS?\s+)?EN\s+GR[ÚU]A\b", b_mask)
+    if m_grua_n:
+        return sum(int(x) for x in m_grua_n)
+    if m_grua_pre:
+        return sum(int(x) for x in m_grua_pre)
+    if re.search(r"\b(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A|VEH[ÍI]CULO\s+EN\s+GR[ÚU]A|EN\s+GR[ÚU]A|EN\s+LA\s+GR[ÚU]A|REMOLCAD[OA])\b", b_up):
         return 1
     return 0
 
@@ -257,7 +279,7 @@ def calcular_infracciones_preciso(b_up: str, b_mask: str) -> int:
     return 0
 
 def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
-    bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
+    bloques = segmentar_narrativos(texto_crudo)
     filas = []
 
     huellas_vistas = set()
@@ -275,7 +297,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
 
     for b in bloques:
         b = b.strip()
-        if not b or not b.startswith("BO-"):
+        if not b:
             continue
         stats["total_bloques"] += 1
 
@@ -286,9 +308,9 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
         huellas_vistas.add(huella)
 
         lineas = [l.strip() for l in b.splitlines() if l.strip()]
-        encabezado = lineas[0]
+        encabezado = lineas[0][:120]
         m_bo = re.match(r"^(BO-\d+)\s*-\s*([^\n]+)", encabezado)
-        bo_code = m_bo.group(1) if m_bo else "BO-S/N"
+        bo_code = m_bo.group(1) if m_bo else "BO-NAR"
         corte = detectar_corte(b)
         inst = detectar_institucion(bo_code, b)
 
@@ -311,19 +333,10 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
 
         oficios = calcular_oficios_preciso(b_up)
         faltas_admin = calcular_faltas_preciso(b_up)
-
-        m_grua_cnt = re.search(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A)\s*[:=\s-]*(\d{1,2})\b", b_mask)
-        if m_grua_cnt:
-            gruas = int(m_grua_cnt.group(1))
-        elif any(k in b_up for k in ["REMOCI[ÓO]N EN GR[ÚU]A", "REMOVIDO EN GR[ÚU]A", "VEH[ÍI]CULO EN GR[ÚU]A", "EN LA GR[ÚU]A"]):
-            gruas = 1
-        else:
-            gruas = 0
-
+        gruas = calcular_gruas_preciso(b_up, b_mask)
         infracciones = calcular_infracciones_preciso(b_up, b_mask)
 
-        # Solo deduplica semánticamente si NO tiene placa, cédula ni oficio
-        if infracciones == 1 and oficios == 0 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
+        if infracciones == 1 and oficios == 0 and gruas == 0 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
             cuerpo_sin_ts = re.sub(r"\[TS\]|\[FECHA\]|\[HORA\]|\[COD\]", "", b_mask)
             firma_sem = f"{corte}|{bo_code}|{calcular_huella_exacta(cuerpo_sin_ts)}"
             if firma_sem in semantica_sin_id:
@@ -364,7 +377,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
         filas.append({
             "Corte": corte,
             "Institución": inst,
-            "Sector (BO)": encabezado,
+            "Sector / Narrativa": encabezado,
             "Oficios / Capturas": oficios,
             "Infracciones": infracciones,
             "Grúas": gruas,
@@ -501,86 +514,6 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None, modo_carga: 
             else:
                 c.font = font_reg
                 c.alignment = al_left
-
-    ws_res.merge_cells("A12:H12")
-    ws_res["A12"] = "DESGLOSE DE INFRACCIONES POR SECTOR (BO) — CORTE 3 (54) Y CORTE 4 (6)"
-    ws_res["A12"].font = font_sec
-    ws_res["A12"].fill = fill_sec
-    ws_res["A12"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    ws_res.row_dimensions[12].height = 24
-
-    hdr_sec = ["Sector / Punto de Control (BO)", "Institución", "Corte 3", "Corte 4", "Total C3+C4", "Detalle Operativo"]
-    ws_res.merge_cells("F13:H13")
-    ws_res.row_dimensions[13].height = 24
-    for idx, h in enumerate(hdr_sec, 1):
-        c = ws_res.cell(row=13, column=idx, value=h)
-        c.font = font_hdr
-        c.alignment = al_center
-    for col_c in range(1, 9):
-        ws_res.cell(row=13, column=col_c).fill = fill_hdr
-        ws_res.cell(row=13, column=col_c).border = border_cell
-
-    sectores = [
-        ("BO-54 - Tanara (Panamá Este)", "SENAFRONT", 8, 2, "C3: 8 boletas (Art. 53A/53D/132C/240, #64, #03) | C4: 2 boletas (#14 y Art. 132C alcoholemia)"),
-        ("BO-53 - Chepo (Entrada principal)", "SENAFRONT", 6, 0, "C3: 5 nocturnas (#14 x4, Art. 132C alcoholemia) + 1 reubicada de C2 (Art. 132C)"),
-        ("BO-61 - Emberá Purú - Arimae (Darién)", "SENAFRONT", 6, 0, "C3: 5 nocturnas (Cód. 46 ebriedad, #16, señales, Art. 53D, #03) + 1 reubicada de C2 (luces reflexivas)"),
-        ("BO-3 - Almirante (Entrada al puerto)", "Policía Nacional", 6, 0, "C3: 4 nocturnas SVC (#14 x3, #01 x1) + 2 reubicadas de C2 (Boleta #70 y 1 grúa)"),
-        ("BO-24 - Divisa (Entrada)", "Policía Nacional", 6, 0, "C3: 6 boletas por diferentes infracciones al reglamento de tránsito (reubicadas de C2)"),
-        ("BO-59 - Agua Fría (Darién)", "SENAFRONT", 5, 0, "C3: Consolidado 5 infracciones verificadas con Tránsito PN (Faltas #32, #70 y #14)"),
-        ("BO-52 - Pacora (Las Garzas)", "Policía Nacional", 4, 0, "C3: Boletas #5034933, #5034934 (sin metálica), #5034935 y #5034936 (Inf. #10 y #40)"),
-        ("BO-6 - Paso Canoas (Frontera / San Isidro)", "SENAFRONT", 2, 3, "C3: 2 boletas #14 (camión 957064 y Nissan pick-up) | C4: 3 boletas cierre turno 1800-0600 hrs"),
-        ("BO-23 - Santiago (Frente a M/S Marticito)", "Policía Nacional", 3, 0, "C3: 3 boletas por luces (1 defectuosa + 2 inadecuadas)"),
-        ("BO-60 - Metetí (Darién)", "SENAFRONT", 3, 0, "C3: 3 boletas nocturnas (Art. 53A luces inadecuadas + Art. 53D luces defectuosas x2)"),
-        ("BO-56 - Corredor Sur (Entrada Llano Bonito)", "Policía Nacional", 2, 0, "C3: Alberto Blanco (CX4552 sin seguro) + 1 reubicada de C2 (Jomil Antala #59 giro indebido)"),
-        ("BO-15 - Frontera Paso Canoas - Sector Bugaba (Portón)", "SENAFRONT", 0, 1, "C4: Infracción de tránsito #32 por exceso de pasajeros (04:25 hrs del 19NOV26)"),
-        ("BO-19 - Atalaya (Ponuga, Veraguas)", "Policía Nacional", 1, 0, "C3: Boleta #3500092597418112026 — Código 735 (Orlando Enrique Silva, moto NC6634)"),
-        ("BO-39 - Capira (Pueblo)", "Policía Nacional", 1, 0, "C3: Infracción #21 vidrios ahumados (Raúl Álvarez, Toyota Coaster 837182)"),
-        ("BO-13 - Guadalupe (David)", "Policía Nacional", 1, 0, "C3: 01 vehículo Hyundai Accent blanco (BV0753) removido en grúa por desacato y licencia vencida"),
-    ]
-
-    r_idx = 14
-    for i_s, (s_nom, s_inst, c3_v, c4_v, s_det) in enumerate(sectores):
-        ws_res.row_dimensions[r_idx].height = 24
-        ws_res.merge_cells(start_row=r_idx, start_column=6, end_row=r_idx, end_column=8)
-        fl = fill_zebra if i_s % 2 == 1 else fill_white
-
-        ws_res.cell(row=r_idx, column=1, value=s_nom).font = font_bld
-        ws_res.cell(row=r_idx, column=2, value=s_inst).font = font_reg
-        ws_res.cell(row=r_idx, column=3, value=c3_v).font = font_bld
-        ws_res.cell(row=r_idx, column=4, value=c4_v).font = font_bld
-        ws_res.cell(row=r_idx, column=5, value=f"=C{r_idx}+D{r_idx}").font = font_bld
-        ws_res.cell(row=r_idx, column=6, value=s_det).font = font_reg
-
-        for col_c in range(1, 9):
-            cell = ws_res.cell(row=r_idx, column=col_c)
-            cell.fill = fl
-            cell.border = border_cell
-            if col_c in (2, 3, 4, 5):
-                cell.alignment = al_center
-                if col_c in (3, 4, 5):
-                    cell.number_format = "#,##0"
-            else:
-                cell.alignment = al_left
-        r_idx += 1
-
-    ws_res.row_dimensions[r_idx].height = 26
-    ws_res.merge_cells(start_row=r_idx, start_column=6, end_row=r_idx, end_column=8)
-    ws_res.cell(row=r_idx, column=1, value="TOTAL POR SECTOR (CORTES 3 Y 4)").font = font_tot
-    ws_res.cell(row=r_idx, column=2, value="PN + SNF").font = font_tot
-    ws_res.cell(row=r_idx, column=3, value=f"=SUM(C14:C{r_idx-1})").font = font_tot
-    ws_res.cell(row=r_idx, column=4, value=f"=SUM(D14:D{r_idx-1})").font = font_tot
-    ws_res.cell(row=r_idx, column=5, value=f"=SUM(E14:E{r_idx-1})").font = font_tot
-    ws_res.cell(row=r_idx, column=6, value="Corte 3: 54 | Corte 4: 6 | Total C3+C4: 60 (Total 24h con C1: 14 y C2: 62 = 136)").font = font_tot
-    for col_c in range(1, 9):
-        cell = ws_res.cell(row=r_idx, column=col_c)
-        cell.fill = fill_tot
-        cell.border = border_tot
-        if col_c in (2, 3, 4, 5):
-            cell.alignment = al_center
-            if col_c in (3, 4, 5):
-                cell.number_format = "#,##0"
-        else:
-            cell.alignment = al_left
 
     rule_pos = CellIsRule(operator="greaterThan", formula=["0"], stopIfTrue=False,
                           fill=PatternFill(start_color="E6F4EA", end_color="E6F4EA", fill_type="solid"))
@@ -801,7 +734,7 @@ with tab_proc:
         key="uploader_vertice"
     )
     texto_pegar = st.text_area(
-        "O pega aquí directamente los textos de reportes operativos:",
+        "O pega aquí directamente los textos o narrativas de reportes operativos:",
         height=200,
         placeholder="- BO-53-Chepo (Entrada principal)...",
         key="textarea_vertice"
