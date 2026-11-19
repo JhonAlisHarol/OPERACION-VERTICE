@@ -17,78 +17,53 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# VALORES AUDITADOS DE REFERENCIA (SIN DUPLICADOS 108 / 12 — 24 HORAS)
+# VALORES BASE AUDITADOS (SIN DUPLICADOS 108 / 12 — 24 HORAS)
 # ==============================================================================
 BASE_VALORES = {
     "Consolidado": {
         "oficios": 14,
-        "oficios_pn": 8,
-        "oficios_snf": 6,
         "infracciones": 136,
-        "inf_pn": 74,
-        "inf_snf": 62,
         "gruas": 3,
-        "gruas_pn": 3,
-        "gruas_snf": 0,
-        "incidentes": 7,
+        "faltas_admin": 7,
         "personas": 4009,
         "vehiculos": 2738,
+        "otras": 0,
     },
     "Corte 1 (06:00-11:59)": {
         "oficios": 3,
-        "oficios_pn": 1,
-        "oficios_snf": 2,
         "infracciones": 14,
-        "inf_pn": 5,
-        "inf_snf": 9,
         "gruas": 0,
-        "gruas_pn": 0,
-        "gruas_snf": 0,
-        "incidentes": 0,
+        "faltas_admin": 0,
         "personas": 0,
         "vehiculos": 0,
+        "otras": 0,
     },
     "Corte 2 (12:00-17:25)": {
         "oficios": 4,
-        "oficios_pn": 3,
-        "oficios_snf": 1,
         "infracciones": 62,
-        "inf_pn": 43,
-        "inf_snf": 19,
         "gruas": 2,
-        "gruas_pn": 2,
-        "gruas_snf": 0,
-        "incidentes": 5,
+        "faltas_admin": 5,
         "personas": 2268,
         "vehiculos": 1741,
+        "otras": 0,
     },
     "Corte 3 (17:26-23:59)": {
         "oficios": 6,
-        "oficios_pn": 4,
-        "oficios_snf": 2,
         "infracciones": 54,
-        "inf_pn": 26,
-        "inf_snf": 28,
         "gruas": 1,
-        "gruas_pn": 1,
-        "gruas_snf": 0,
-        "incidentes": 2,
+        "faltas_admin": 2,
         "personas": 1528,
         "vehiculos": 852,
+        "otras": 0,
     },
     "Corte 4 (00:00-06:00)": {
         "oficios": 1,
-        "oficios_pn": 0,
-        "oficios_snf": 1,
         "infracciones": 6,
-        "inf_pn": 0,
-        "inf_snf": 6,
         "gruas": 0,
-        "gruas_pn": 0,
-        "gruas_snf": 0,
-        "incidentes": 0,
+        "faltas_admin": 0,
         "personas": 213,
         "vehiculos": 145,
+        "otras": 0,
     },
 }
 
@@ -115,7 +90,7 @@ def detectar_institucion(bo_code: str, texto: str) -> str:
 
 def detectar_corte(texto: str) -> str:
     t_up = texto.upper()
-    m_mil = re.search(r"\b(\d{2})(\d{2})(\d{2})NOV\d{2}\b", t_up)
+    m_mil = re.search(r"\b(\d{2})(\d{2})(\d{2})NOV\d{2,4}\b", t_up)
     if m_mil:
         dia, hh, mm = int(m_mil.group(1)), int(m_mil.group(2)), int(m_mil.group(3))
         mins = hh * 60 + mm
@@ -149,11 +124,33 @@ def detectar_corte(texto: str) -> str:
         return "Corte 3 (17:26-23:59)"
     return "Corte 2 (12:00-17:25)"
 
-def parsear_reportes_sin_duplicados(texto_crudo: str) -> pd.DataFrame:
+def enmascarar_identificadores(texto_up: str) -> str:
+    """Evita que placas, cédulas/CIP, horas, fechas o números de boleta/artículo se cuenten como cantidades."""
+    s = re.sub(r"\b\d{2}\d{2}\d{2}NOV\d{2,4}\b", " [TS] ", texto_up)
+    s = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " [FECHA] ", s)
+    s = re.sub(r"\b\d{1,2}:\d{2}(?:\s*(?:A\.?M\.?|P\.?M\.?|HRS?))?\b", " [HORA] ", s)
+    s = re.sub(r"B/\.?\s*\d+(?:\.\d{1,2})?", " [MONTO] ", s)
+    # Cédulas / CIP / Pasaportes (ej. 8-872-2445, 4-788-2101, E-8-91652)
+    s = re.sub(r"\b(?:[A-Z]-)?\d{1,2}-\d{3,5}-\d{3,5}\b", " [ID] ", s)
+    # Boleta #, Infracción #, Falta #, Artículo #, Código #, Oficio #
+    s = re.sub(
+        r"(?:BOLETA|INFRACCI[ÓO]N|FALTA|ART[ÍI]CULO|ARTICULO|C[ÓO]DIGO|OFICIO|SUBROGADO)\s*(?:N[°º#.\s-]*|INCISO\s*[A-Z]?\s*)?[A-Z0-9-]*",
+        " [COD] ",
+        s
+    )
+    # Placas / matrículas / metálicas
+    s = re.sub(
+        r"(?:PLACA|MATR[ÍI]CULA|MATRICULA|MET[ÁA]LICA|METALICA)\s*(?:N[°º#.\s-]*)?[A-Z]{1,3}\d{1,6}|\b[A-Z]{2}\d{3,6}\b|\b\d{6}\b",
+        " [PLACA] ",
+        s
+    )
+    return s
+
+def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
     bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
     filas = []
     vistos_exactos = set()
-    huellas_boletas = set()
+    huellas_sin_id = set()
 
     for b in bloques:
         b = b.strip()
@@ -171,60 +168,102 @@ def parsear_reportes_sin_duplicados(texto_crudo: str) -> pd.DataFrame:
         bo_code = m_bo.group(1) if m_bo else "BO-S/N"
         corte = detectar_corte(b)
         inst = detectar_institucion(bo_code, b)
-        b_up = b.upper()
 
-        es_rutina = bool(re.search(r"NOS MANTENEMOS\s+(?:EN\s+LA\s+)?REALIZANDO\s+(?:UNA\s+)?BOLETA", b_up)) and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C[ÉE]DULA|C\.I\.P|N°\s*\d+|#\d+)", b_up)
+        b_up = b.upper()
+        b_mask = enmascarar_identificadores(b_up)
+
+        # Mensajes genéricos de rutina sin placa, cédula ni código de boleta
+        es_rutina = bool(re.search(r"NOS MANTENEMOS\s+(?:EN\s+LA\s+)?REALIZANDO\s+(?:UNA\s+)?BOLETA", b_up)) and not any(
+            tok in b_mask for tok in ["[PLACA]", "[ID]", "[COD]"]
+        )
         if es_rutina or any(k in b_up for k in ["SE PUEDEN REGISTRAR INFRACCIONES", "NO SE MANTIENE BASTÓN", "NO SE MANTIENE BASTON"]):
             continue
 
-        oficios = 1 if any(k in b_up for k in ["CONDUCCIÓN JUDICIAL", "CONDUCCION JUDICIAL", "CAPTURA", "OFICIO DE", "OFICIO N", "CINTILLO ROJO"]) else 0
-        incidentes = 1 if any(k in b_up for k in ["INDOCUMENTADO", "ESTADÍA VENCIDA", "ESTADIA VENCIDA", "ACTA DE INSPECCIÓN SANITARIA", "BOLETA DE CITACIÓN", "ETRM", "C.V.I"]) else 0
+        # 1. Conducción / Captura / Cintillo / Oficio
+        oficios = 1 if any(k in b_up for k in [
+            "OFICIO DE CONDUCCI", "OFICIO DE CAPTURA", "OFICIO JUDICIAL", "OFICIO DE SUBROGADO",
+            "CONDUCCI[ÓO]N JUDICIAL", "APREHENSI[ÓO]N POR OFICIO", "CINTILLO ROJO", "OFICIO N"
+        ]) else 0
 
-        m_grua = re.search(r"REMOCI[ÓO]N\s+EN\s+GR[ÚU]A\s*[:=.-]*\s*(\d+)", b_up)
-        gruas = int(m_grua.group(1)) if m_grua else (1 if any(k in b_up for k in ["GRÚA", "GRUA", "REMOVIDO EN GRÚA", "REMOVIDO EN GRUA", "VEHÍCULO EN GRÚA", "VEHICULO EN GRUA"]) else 0)
+        # 2. Faltas administrativas / Indocumentados / Migración / Salud / Citación
+        faltas_admin = 1 if any(k in b_up for k in [
+            "INDOCUMENTADO", "SIN DOCUMENTO", "ESTAD[ÍI]A VENCIDA", "MIGRACI[ÓO]N", "S.N.M", "SNM",
+            "ACTA DE INSPECCI[ÓO]N SANITARIA", "MINSA", "BOLETA DE CITACI[ÓO]N", "C.V.I", "ETRM"
+        ]) else 0
 
-        boletas = 0
-        if "INFRACCIÓN DE TRÁNSITO (00)" not in b_up and "INFRACCION DE TRANSITO (00)" not in b_up and "BOLETAS PUESTAS POR LA UNIDAD DEL TRÁNSITO 0" not in b_up:
-            m_bol_rev = re.search(r"(?:BOLETAS|INFRACCIONES\s+DE\s+TR[ÁA]NSITO)\s*[:=.-]*\s*(\d+)", b_up)
-            m_bol = re.search(r"(\d+)\s*(?:BOLETAS|INFRACCIONES)", b_up)
-            if m_bol_rev:
-                boletas = int(m_bol_rev.group(1))
-            elif m_bol:
-                boletas = int(m_bol.group(1))
-            elif any(k in b_up for k in ["INFRACCIÓN", "INFRACCION", "BOLETA #", "BOLETA N", "ARTÍCULO 240", "ARTICULO 240", "ARTÍCULO 132", "ARTICULO 132", "SANCIONADO", "SANCIONÓ"]):
-                boletas = 1
+        # 3. Vehículos removidos en grúa
+        m_grua_cnt = re.search(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A)\s*[:=\s-]*(\d{1,2})\b", b_mask)
+        if m_grua_cnt:
+            gruas = int(m_grua_cnt.group(1))
+        elif any(k in b_up for k in ["REMOCI[ÓO]N EN GR[ÚU]A", "REMOVIDO EN GR[ÚU]A", "VEH[ÍI]CULO EN GR[ÚU]A", "EN LA GR[ÚU]A"]):
+            gruas = 1
+        else:
+            gruas = 0
 
-        if boletas == 1 and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C\.I\.P|C[ÉE]DULA|BOLETA\s*#?\s*\d+)", b_up):
-            firma = f"{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_up[:90])}"
-            if firma in huellas_boletas:
-                boletas = 0
+        # 4. Infracciones de tránsito (nunca toma placas ni números de boleta como cantidad)
+        infracciones = 0
+        if not re.search(r"(?:INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|BOLETAS\s+PUESTAS)\s*[:=\s(-]*0+\b", b_mask):
+            m_cnt_antes = re.findall(r"\b(\d{1,3})\s*(?:BOLETAS?|INFRACCIONES?|SANCIONES?)\b", b_mask)
+            m_cnt_despues = re.findall(r"\b(?:BOLETAS?|INFRACCIONES?\s+DE\s+TR[ÁA]NSITO|SANCIONES?)\s*[:=\s-]+(\d{1,3})\b", b_mask)
+            if m_cnt_despues:
+                infracciones = sum(int(x) for x in m_cnt_despues)
+            elif m_cnt_antes:
+                infracciones = sum(int(x) for x in m_cnt_antes)
+            elif any(k in b_up for k in [
+                "SE COLOCA INFRACCI", "SE REALIZA INFRACCI", "SE REALIZA BOLETA",
+                "SE SANCION", "ES SANCION", "BOLETA DE INFRACCI", "INFRACCI[ÓO]N DE TR[ÁA]NSITO",
+                "SE LE RETIRA LICENCIA", "SE LE RETIENE LICENCIA", "EMBRIAGUEZ COMPROBADA"
+            ]):
+                infracciones = 1
+
+        # Evitar doble conteo de boletas sin ID/placa repetidas en el mismo BO
+        if infracciones == 1 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
+            clave_dup = f"{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_mask[:80])}"
+            if clave_dup in huellas_sin_id:
+                infracciones = 0
             else:
-                huellas_boletas.add(firma)
+                huellas_sin_id.add(clave_dup)
 
+        # 5. Personas verificadas
         personas = 0
-        vehiculos = 0
-        m_pers = re.findall(r"(?:PERSONAS(?:\s+VERIFICADAS)?|CIUDADANOS(?:\s+NACIONALES|\s+EXTRANJEROS)?)\s*[:=.-]*\s*(\d+)", b_up)
-        if m_pers:
-            personas = sum(int(x) for x in m_pers)
-        elif "PERSONA VERIFICADA" in b_up or "CIUDADANO VERIFICADO" in b_up or oficios or incidentes:
-            personas = 1
+        for pat in [
+            r"\bPERSONAS(?:\s+VERIFICADAS)?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\bCIUDADANOS(?:\s+NACIONALES|\s+EXTRANJEROS)?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\b(\d{1,4})\s+CIUDADANOS?\s+(?:NACIONALES?|EXTRANJEROS?|VERIFICADOS?)\b",
+        ]:
+            found_p = re.findall(pat, b_mask)
+            if found_p:
+                personas = max(personas, sum(int(x) for x in found_p))
 
-        m_veh = re.findall(r"(?:VEH[ÍI]CULOS(?:\s+PARTICULARES|\s+NACIONALES|\s+EXTRANJEROS)?|TAXIS?|BUSES?|MOTOS?|CAMI[ÓO]N(?:ES)?|VOLQUETES?|ARTICULADOS?|MULAS?)\s*[:=.-]*\s*([0-9]+)", b_up)
-        if m_veh:
-            vehiculos = sum(int(x) for x in m_veh)
-        elif "PLACA" in b_up or "MATRÍCULA" in b_up or "MATRICULA" in b_up or gruas > 0:
-            vehiculos = 1
+        # 6. Vehículos verificados
+        vehiculos = 0
+        for pat in [
+            r"\bVEH[ÍI]CULOS(?:\s+VERIFICADOS|\s+PARTICULARES|\s+NACIONALES|\s+EXTRANJEROS)?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\bMOTOS?(?:\s+VERIFICADAS?)?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\bTAXIS?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\bBUSES?\s*[:=\s.-]*(\d{1,4})\b",
+            r"\bCAMIONES?\s*[:=\s.-]*(\d{1,4})\b",
+        ]:
+            found_v = re.findall(pat, b_mask)
+            if found_v:
+                vehiculos += sum(int(x) for x in found_v)
+
+        # 7. Otras acciones (armamento con permiso, inspecciones, controles especiales)
+        otras = 1 if (oficios == 0 and faltas_admin == 0 and gruas == 0 and infracciones == 0 and personas == 0 and vehiculos == 0 and any(
+            k in b_up for k in ["ARMA", "PERMISO", "INSPECCI", "PROFILAXIS", "325", "NARC[ÓO]TICOS", "ADUANAS", "MIDA"]
+        )) else 0
 
         filas.append({
             "Corte": corte,
             "Institución": inst,
             "Sector (BO)": encabezado,
-            "Oficios": oficios,
-            "Infracciones": boletas,
+            "Oficios / Capturas": oficios,
+            "Infracciones": infracciones,
             "Grúas": gruas,
-            "Incidentes": incidentes,
-            "Personas": personas,
-            "Vehículos": vehiculos,
+            "Faltas Admin / Indoc": faltas_admin,
+            "Personas Verificadas": personas,
+            "Vehículos Verificados": vehiculos,
+            "Otras Acciones": otras,
             "Detalle": " ".join(lineas[1:])[:320]
         })
 
@@ -301,10 +340,10 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
 
     filas_res = [
         ("Personas Solicitadas / Capturas (Oficios)",
-         3 + add_ex("Oficios", "Corte 1 (06:00-11:59)"),
-         4 + add_ex("Oficios", "Corte 2 (12:00-17:25)"),
-         6 + add_ex("Oficios", "Corte 3 (17:26-23:59)"),
-         1 + add_ex("Oficios", "Corte 4 (00:00-06:00)"),
+         3 + add_ex("Oficios / Capturas", "Corte 1 (06:00-11:59)"),
+         4 + add_ex("Oficios / Capturas", "Corte 2 (12:00-17:25)"),
+         6 + add_ex("Oficios / Capturas", "Corte 3 (17:26-23:59)"),
+         1 + add_ex("Oficios / Capturas", "Corte 4 (00:00-06:00)"),
          "=SUM(B5:E5)", "8 PN / 6 SNF", "3 + 4 + 6 + 1 = 14 capturas por oficio"),
         ("Infracciones de Tránsito Registradas",
          14 + add_ex("Infracciones", "Corte 1 (06:00-11:59)"),
@@ -319,22 +358,22 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
          0 + add_ex("Grúas", "Corte 4 (00:00-06:00)"),
          "=SUM(B7:E7)", "3 PN / 0 SNF", "Llano Bonito, Almirante y David BV0753"),
         ("Faltas Administrativas / Migratorias / Indocumentados",
-         0 + add_ex("Incidentes", "Corte 1 (06:00-11:59)"),
-         5 + add_ex("Incidentes", "Corte 2 (12:00-17:25)"),
-         2 + add_ex("Incidentes", "Corte 3 (17:26-23:59)"),
-         0 + add_ex("Incidentes", "Corte 4 (00:00-06:00)"),
+         0 + add_ex("Faltas Admin / Indoc", "Corte 1 (06:00-11:59)"),
+         5 + add_ex("Faltas Admin / Indoc", "Corte 2 (12:00-17:25)"),
+         2 + add_ex("Faltas Admin / Indoc", "Corte 3 (17:26-23:59)"),
+         0 + add_ex("Faltas Admin / Indoc", "Corte 4 (00:00-06:00)"),
          "=SUM(B8:E8)", "SNM / MINSA / PN / SNF", "0 + 5 + 2 + 0 = 7 faltas admin / indocumentados"),
         ("Personas Verificadas (Conteo Depurado)",
-         0 + add_ex("Personas", "Corte 1 (06:00-11:59)"),
-         2268 + add_ex("Personas", "Corte 2 (12:00-17:25)"),
-         1528 + add_ex("Personas", "Corte 3 (17:26-23:59)"),
-         213 + add_ex("Personas", "Corte 4 (00:00-06:00)"),
+         0 + add_ex("Personas Verificadas", "Corte 1 (06:00-11:59)"),
+         2268 + add_ex("Personas Verificadas", "Corte 2 (12:00-17:25)"),
+         1528 + add_ex("Personas Verificadas", "Corte 3 (17:26-23:59)"),
+         213 + add_ex("Personas Verificadas", "Corte 4 (00:00-06:00)"),
          "=SUM(B9:E9)", "PN + SENAFRONT", "2,268 + 1,528 + 213 = 4,009 personas"),
         ("Vehículos Verificados (Conteo Depurado)",
-         0 + add_ex("Vehículos", "Corte 1 (06:00-11:59)"),
-         1741 + add_ex("Vehículos", "Corte 2 (12:00-17:25)"),
-         852 + add_ex("Vehículos", "Corte 3 (17:26-23:59)"),
-         145 + add_ex("Vehículos", "Corte 4 (00:00-06:00)"),
+         0 + add_ex("Vehículos Verificados", "Corte 1 (06:00-11:59)"),
+         1741 + add_ex("Vehículos Verificados", "Corte 2 (12:00-17:25)"),
+         852 + add_ex("Vehículos Verificados", "Corte 3 (17:26-23:59)"),
+         145 + add_ex("Vehículos Verificados", "Corte 4 (00:00-06:00)"),
          "=SUM(B10:E10)", "PN + SENAFRONT", "1,741 + 852 + 145 = 2,738 vehículos"),
     ]
 
@@ -356,7 +395,6 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
                 c.font = font_reg
                 c.alignment = al_left
 
-    # Sección por Sector de Infracciones (evitando escribir .value en MergedCell)
     ws_res.merge_cells("A12:H12")
     ws_res["A12"] = "DESGLOSE DE INFRACCIONES POR SECTOR (BO) — CORTE 3 (54) Y CORTE 4 (6)"
     ws_res["A12"].font = font_sec
@@ -526,12 +564,13 @@ vals_act = BASE_VALORES[grupo_sel].copy()
 if "df_vertice_extra" in st.session_state and not st.session_state["df_vertice_extra"].empty:
     df_ex = st.session_state["df_vertice_extra"]
     sub_ex = df_ex if grupo_sel == "Consolidado" else df_ex[df_ex["Corte"] == grupo_sel]
-    vals_act["oficios"] += int(sub_ex["Oficios"].sum())
+    vals_act["oficios"] += int(sub_ex["Oficios / Capturas"].sum())
     vals_act["infracciones"] += int(sub_ex["Infracciones"].sum())
     vals_act["gruas"] += int(sub_ex["Grúas"].sum())
-    vals_act["incidentes"] += int(sub_ex["Incidentes"].sum())
-    vals_act["personas"] += int(sub_ex["Personas"].sum())
-    vals_act["vehiculos"] += int(sub_ex["Vehículos"].sum())
+    vals_act["faltas_admin"] += int(sub_ex["Faltas Admin / Indoc"].sum())
+    vals_act["personas"] += int(sub_ex["Personas Verificadas"].sum())
+    vals_act["vehiculos"] += int(sub_ex["Vehículos Verificados"].sum())
+    vals_act["otras"] += int(sub_ex["Otras Acciones"].sum())
 
 tab_pres, tab_proc = st.tabs(["📊 Presentación Ejecutiva (CON-C5)", "📥 Cargar Textos y Exportar Excel"])
 
@@ -565,7 +604,7 @@ with tab_pres:
           <div style="display:flex; justify-content:space-around; align-items:center; padding-top:6px;">
             <div>
               <div class="kpi-big kpi-amber" style="font-size:32px;">{vals_act['oficios']}</div>
-              <div class="kpi-lbl" style="font-size:10px;">ACCIONES POLICIALES</div>
+              <div class="kpi-lbl" style="font-size:10px;">OFICIOS / CAPTURAS</div>
               <div style="color:#94A3B8; font-size:10px; text-align:center;">{grupo_sel}</div>
             </div>
             <div>
@@ -574,8 +613,8 @@ with tab_pres:
               <div style="color:#94A3B8; font-size:10px; text-align:center;">Vehículos: {vals_act['vehiculos']:,}</div>
             </div>
             <div>
-              <div class="kpi-big kpi-amber" style="font-size:32px;">{vals_act['incidentes']}</div>
-              <div class="kpi-lbl" style="font-size:10px;">INCIDENTES</div>
+              <div class="kpi-big kpi-amber" style="font-size:32px;">{vals_act['faltas_admin']}</div>
+              <div class="kpi-lbl" style="font-size:10px;">FALTAS ADMIN / INDOC</div>
               <div style="color:#94A3B8; font-size:10px; text-align:center;">{grupo_sel}</div>
             </div>
           </div>
@@ -604,18 +643,19 @@ with tab_pres:
     b1, b2, b3 = st.columns([1.4, 1.4, 1.2])
 
     with b1:
-        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE ACCIONES POLICIALES</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE CONDUCCIÓN, CAPTURA Y VERIFICACIÓN</div></div>', unsafe_allow_html=True)
         df_acc_det = pd.DataFrame([
-            {"Tipo": "Persona solicitada (Oficios)", "Total": vals_act["oficios"]},
+            {"Tipo": "Conducción / Captura / Cintillo / Oficio", "Total": vals_act["oficios"]},
             {"Tipo": "Personas verificadas (PDA/SVC)", "Total": vals_act["personas"]},
             {"Tipo": "Vehículos verificados", "Total": vals_act["vehiculos"]},
+            {"Tipo": "Otras acciones operativas", "Total": vals_act["otras"]},
         ])
         st.dataframe(df_acc_det, use_container_width=True, hide_index=True)
 
     with b2:
-        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE INCIDENTES</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE FALTAS, GRÚAS E INFRACCIONES</div></div>', unsafe_allow_html=True)
         df_inc_det = pd.DataFrame([
-            {"Tipo": "Falta administrativa / Migratoria / C.V.I.", "Total": vals_act["incidentes"]},
+            {"Tipo": "Faltas administrativas / Indocumentados / Migración", "Total": vals_act["faltas_admin"]},
             {"Tipo": "Vehículos removidos en grúa", "Total": vals_act["gruas"]},
             {"Tipo": "Infracciones de tránsito", "Total": vals_act["infracciones"]},
         ])
@@ -635,15 +675,15 @@ with tab_pres:
 
 with tab_proc:
     texto_pegar = st.text_area(
-        "Pega aquí los textos de reportes operativos para extraer y sumar valores (sin duplicados):",
+        "Pega aquí los textos de reportes operativos (sin confundir placas, cédulas ni números de boleta con cantidades):",
         height=240,
         placeholder="- BO-53-Chepo (Entrada principal)..."
     )
-    if st.button("⚙️ Extraer Valores y Actualizar Presentación", type="primary"):
+    if st.button("⚙️ Analizar Reportes y Actualizar Presentación", type="primary"):
         if texto_pegar.strip():
-            df_ex = parsear_reportes_sin_duplicados(texto_pegar)
+            df_ex = analizar_reportes_texto(texto_pegar)
             st.session_state["df_vertice_extra"] = df_ex
-            st.success(f"✅ {len(df_ex)} registros únicos extraídos y sumados.")
+            st.success(f"✅ {len(df_ex)} reportes únicos analizados con precisión.")
             st.dataframe(df_ex, use_container_width=True, hide_index=True)
 
     excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"))
