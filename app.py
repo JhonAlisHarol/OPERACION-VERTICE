@@ -347,7 +347,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
 
     return pd.DataFrame(filas), stats
 
-def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
+def generar_excel_consolidado(df_extra: pd.DataFrame | None = None, modo_carga: str = "Sumar como reporte nuevo") -> bytes:
     wb = openpyxl.Workbook()
 
     HEADER_DARK = "23395D"
@@ -411,47 +411,48 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
         c.alignment = al_center
         c.border = border_cell
 
-    def add_ex(col_k, corte_lbl):
-        if df_extra is None or df_extra.empty:
-            return 0
-        return int(df_extra[df_extra["Corte"] == corte_lbl][col_k].sum())
+    reemplazar = (modo_carga == "Reemplazar valores base") and (df_extra is not None)
+
+    def val_celda(base_v, col_k, corte_lbl):
+        ex_v = int(df_extra[df_extra["Corte"] == corte_lbl][col_k].sum()) if (df_extra is not None and not df_extra.empty) else 0
+        return ex_v if reemplazar else (base_v + ex_v)
 
     filas_res = [
         ("Personas Solicitadas / Capturas (Oficios)",
-         3 + add_ex("Oficios / Capturas", "Corte 1 (06:00-11:59)"),
-         4 + add_ex("Oficios / Capturas", "Corte 2 (12:00-17:25)"),
-         6 + add_ex("Oficios / Capturas", "Corte 3 (17:26-23:59)"),
-         1 + add_ex("Oficios / Capturas", "Corte 4 (00:00-06:00)"),
+         val_celda(3, "Oficios / Capturas", "Corte 1 (06:00-11:59)"),
+         val_celda(4, "Oficios / Capturas", "Corte 2 (12:00-17:25)"),
+         val_celda(6, "Oficios / Capturas", "Corte 3 (17:26-23:59)"),
+         val_celda(1, "Oficios / Capturas", "Corte 4 (00:00-06:00)"),
          "=SUM(B5:E5)", "8 PN / 6 SNF", "3 + 4 + 6 + 1 = 14 capturas por oficio"),
         ("Infracciones de Tránsito Registradas",
-         14 + add_ex("Infracciones", "Corte 1 (06:00-11:59)"),
-         62 + add_ex("Infracciones", "Corte 2 (12:00-17:25)"),
-         54 + add_ex("Infracciones", "Corte 3 (17:26-23:59)"),
-         6 + add_ex("Infracciones", "Corte 4 (00:00-06:00)"),
+         val_celda(14, "Infracciones", "Corte 1 (06:00-11:59)"),
+         val_celda(62, "Infracciones", "Corte 2 (12:00-17:25)"),
+         val_celda(54, "Infracciones", "Corte 3 (17:26-23:59)"),
+         val_celda(6, "Infracciones", "Corte 4 (00:00-06:00)"),
          "=SUM(B6:E6)", "74 PN / 62 SNF", "14 + 62 + 54 + 6 = 136 (sin 108/12)"),
         ("Vehículos Removidos en Grúa",
-         0 + add_ex("Grúas", "Corte 1 (06:00-11:59)"),
-         2 + add_ex("Grúas", "Corte 2 (12:00-17:25)"),
-         1 + add_ex("Grúas", "Corte 3 (17:26-23:59)"),
-         0 + add_ex("Grúas", "Corte 4 (00:00-06:00)"),
+         val_celda(0, "Grúas", "Corte 1 (06:00-11:59)"),
+         val_celda(2, "Grúas", "Corte 2 (12:00-17:25)"),
+         val_celda(1, "Grúas", "Corte 3 (17:26-23:59)"),
+         val_celda(0, "Grúas", "Corte 4 (00:00-06:00)"),
          "=SUM(B7:E7)", "3 PN / 0 SNF", "Llano Bonito, Almirante y David BV0753"),
         ("Faltas Administrativas / Migratorias / Indocumentados",
-         0 + add_ex("Faltas Admin / Indoc", "Corte 1 (06:00-11:59)"),
-         5 + add_ex("Faltas Admin / Indoc", "Corte 2 (12:00-17:25)"),
-         2 + add_ex("Faltas Admin / Indoc", "Corte 3 (17:26-23:59)"),
-         0 + add_ex("Faltas Admin / Indoc", "Corte 4 (00:00-06:00)"),
+         val_celda(0, "Faltas Admin / Indoc", "Corte 1 (06:00-11:59)"),
+         val_celda(5, "Faltas Admin / Indoc", "Corte 2 (12:00-17:25)"),
+         val_celda(2, "Faltas Admin / Indoc", "Corte 3 (17:26-23:59)"),
+         val_celda(0, "Faltas Admin / Indoc", "Corte 4 (00:00-06:00)"),
          "=SUM(B8:E8)", "SNM / MINSA / PN / SNF", "0 + 5 + 2 + 0 = 7 faltas admin / indocumentados"),
         ("Personas Verificadas (Conteo Depurado)",
-         0 + add_ex("Personas Verificadas", "Corte 1 (06:00-11:59)"),
-         2268 + add_ex("Personas Verificadas", "Corte 2 (12:00-17:25)"),
-         1528 + add_ex("Personas Verificadas", "Corte 3 (17:26-23:59)"),
-         213 + add_ex("Personas Verificadas", "Corte 4 (00:00-06:00)"),
+         val_celda(0, "Personas Verificadas", "Corte 1 (06:00-11:59)"),
+         val_celda(2268, "Personas Verificadas", "Corte 2 (12:00-17:25)"),
+         val_celda(1528, "Personas Verificadas", "Corte 3 (17:26-23:59)"),
+         val_celda(213, "Personas Verificadas", "Corte 4 (00:00-06:00)"),
          "=SUM(B9:E9)", "PN + SENAFRONT", "2,268 + 1,528 + 213 = 4,009 personas"),
         ("Vehículos Verificados (Conteo Depurado)",
-         0 + add_ex("Vehículos Verificados", "Corte 1 (06:00-11:59)"),
-         1741 + add_ex("Vehículos Verificados", "Corte 2 (12:00-17:25)"),
-         852 + add_ex("Vehículos Verificados", "Corte 3 (17:26-23:59)"),
-         145 + add_ex("Vehículos Verificados", "Corte 4 (00:00-06:00)"),
+         val_celda(0, "Vehículos Verificados", "Corte 1 (06:00-11:59)"),
+         val_celda(1741, "Vehículos Verificados", "Corte 2 (12:00-17:25)"),
+         val_celda(852, "Vehículos Verificados", "Corte 3 (17:26-23:59)"),
+         val_celda(145, "Vehículos Verificados", "Corte 4 (00:00-06:00)"),
          "=SUM(B10:E10)", "PN + SENAFRONT", "1,741 + 852 + 145 = 2,738 vehículos"),
     ]
 
@@ -615,6 +616,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+if "modo_carga_vertice" not in st.session_state:
+    st.session_state["modo_carga_vertice"] = "Sumar como reporte nuevo"
+
 col_b_izq, col_b_der = st.columns([3.4, 1.1])
 with col_b_izq:
     st.markdown("""
@@ -637,20 +641,86 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-vals_act = BASE_VALORES[grupo_sel].copy()
-
-if "df_vertice_extra" in st.session_state and not st.session_state["df_vertice_extra"].empty:
-    df_ex = st.session_state["df_vertice_extra"]
-    sub_ex = df_ex if grupo_sel == "Consolidado" else df_ex[df_ex["Corte"] == grupo_sel]
-    vals_act["oficios"] += int(sub_ex["Oficios / Capturas"].sum())
-    vals_act["infracciones"] += int(sub_ex["Infracciones"].sum())
-    vals_act["gruas"] += int(sub_ex["Grúas"].sum())
-    vals_act["faltas_admin"] += int(sub_ex["Faltas Admin / Indoc"].sum())
-    vals_act["personas"] += int(sub_ex["Personas Verificadas"].sum())
-    vals_act["vehiculos"] += int(sub_ex["Vehículos Verificados"].sum())
-    vals_act["otras"] += int(sub_ex["Otras Acciones"].sum())
-
 tab_pres, tab_proc = st.tabs(["📊 Presentación Ejecutiva (CON-C5)", "📥 Cargar Textos, PDF / Word / Excel"])
+
+with tab_proc:
+    modo_carga = st.radio(
+        "Modo de actualización al cargar o pegar datos:",
+        options=["Sumar como reporte nuevo", "Reemplazar valores base"],
+        index=0 if st.session_state["modo_carga_vertice"] == "Sumar como reporte nuevo" else 1,
+        horizontal=True
+    )
+    st.session_state["modo_carga_vertice"] = modo_carga
+
+    archivos_subidos = st.file_uploader(
+        "Cargar archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT (actualización automática):",
+        type=["pdf", "docx", "xlsx", "xls", "csv", "txt"],
+        accept_multiple_files=True,
+        key="uploader_vertice_auto"
+    )
+    texto_pegar = st.text_area(
+        "O pega aquí directamente los textos de reportes operativos (actualización automática):",
+        height=210,
+        placeholder="- BO-53-Chepo (Entrada principal)...",
+        key="texto_vertice_auto"
+    )
+
+    texto_archivos = extraer_texto_archivos(archivos_subidos)
+    texto_combinado = "\n".join(x for x in [texto_archivos, texto_pegar] if x and x.strip())
+
+    if texto_combinado.strip():
+        df_ex, stats_dup = analizar_reportes_texto(texto_combinado)
+        st.session_state["df_vertice_extra"] = df_ex
+        st.session_state["stats_dup"] = stats_dup
+        st.info(f"⚡ Actualización automática activa ({modo_carga}): {stats_dup['unicos_validos']} registros únicos de {stats_dup['total_bloques']} bloques detectados.")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Duplicados Exactos", stats_dup["duplicados_exactos"])
+        d2.metric("Duplicados por Placa/ID/Boleta", stats_dup["duplicados_entidad"])
+        d3.metric("Duplicados Semánticos", stats_dup["duplicados_semanticos"])
+        d4.metric("Rutina / Sin Boleta", stats_dup["rutina_o_vacio"])
+        st.dataframe(df_ex, use_container_width=True, hide_index=True)
+    else:
+        st.session_state["df_vertice_extra"] = None
+        st.session_state["stats_dup"] = None
+
+    excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"), st.session_state["modo_carga_vertice"])
+    st.download_button(
+        label="📥 Descargar Excel Consolidado (4 Cortes — Sin Duplicados)",
+        data=excel_data,
+        file_name=f"Operacion_Vertice_4_Cortes_{datetime.now().strftime('%d%b%y_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+vals_act = BASE_VALORES[grupo_sel].copy()
+df_ex_act = st.session_state.get("df_vertice_extra")
+modo_act = st.session_state.get("modo_carga_vertice", "Sumar como reporte nuevo")
+
+if df_ex_act is not None:
+    sub_ex = df_ex_act if grupo_sel == "Consolidado" else df_ex_act[df_ex_act["Corte"] == grupo_sel]
+    ex_oficios = int(sub_ex["Oficios / Capturas"].sum()) if not sub_ex.empty else 0
+    ex_inf = int(sub_ex["Infracciones"].sum()) if not sub_ex.empty else 0
+    ex_gruas = int(sub_ex["Grúas"].sum()) if not sub_ex.empty else 0
+    ex_faltas = int(sub_ex["Faltas Admin / Indoc"].sum()) if not sub_ex.empty else 0
+    ex_pers = int(sub_ex["Personas Verificadas"].sum()) if not sub_ex.empty else 0
+    ex_veh = int(sub_ex["Vehículos Verificados"].sum()) if not sub_ex.empty else 0
+    ex_otras = int(sub_ex["Otras Acciones"].sum()) if not sub_ex.empty else 0
+
+    if modo_act == "Reemplazar valores base":
+        vals_act["oficios"] = ex_oficios
+        vals_act["infracciones"] = ex_inf
+        vals_act["gruas"] = ex_gruas
+        vals_act["faltas_admin"] = ex_faltas
+        vals_act["personas"] = ex_pers
+        vals_act["vehiculos"] = ex_veh
+        vals_act["otras"] = ex_otras
+    else:
+        vals_act["oficios"] += ex_oficios
+        vals_act["infracciones"] += ex_inf
+        vals_act["gruas"] += ex_gruas
+        vals_act["faltas_admin"] += ex_faltas
+        vals_act["personas"] += ex_pers
+        vals_act["vehiculos"] += ex_veh
+        vals_act["otras"] += ex_otras
 
 with tab_pres:
     c1, c2, c3, c4 = st.columns([1.0, 1.1, 1.8, 1.3])
@@ -750,41 +820,3 @@ with tab_pres:
           </div>
         </div>
         """, unsafe_allow_html=True)
-
-with tab_proc:
-    archivos_subidos = st.file_uploader(
-        "Cargar archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT:",
-        type=["pdf", "docx", "xlsx", "xls", "csv", "txt"],
-        accept_multiple_files=True
-    )
-    texto_pegar = st.text_area(
-        "O pega aquí directamente los textos de reportes operativos:",
-        height=210,
-        placeholder="- BO-53-Chepo (Entrada principal)..."
-    )
-
-    if st.button("⚙️ Analizar Texto / Archivos y Actualizar Presentación", type="primary"):
-        texto_archivos = extraer_texto_archivos(archivos_subidos)
-        texto_combinado = "\n".join(x for x in [texto_archivos, texto_pegar] if x and x.strip())
-
-        if not texto_combinado.strip():
-            st.warning("Pega algún texto o sube un archivo PDF, Word o Excel antes de analizar.")
-        else:
-            df_ex, stats_dup = analizar_reportes_texto(texto_combinado)
-            st.session_state["df_vertice_extra"] = df_ex
-            st.session_state["stats_dup"] = stats_dup
-            st.success(f"✅ {stats_dup['unicos_validos']} registros únicos analizados de {stats_dup['total_bloques']} bloques detectados.")
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Duplicados Exactos", stats_dup["duplicados_exactos"])
-            d2.metric("Duplicados por Placa/ID/Boleta", stats_dup["duplicados_entidad"])
-            d3.metric("Duplicados Semánticos", stats_dup["duplicados_semanticos"])
-            d4.metric("Rutina / Sin Boleta", stats_dup["rutina_o_vacio"])
-            st.dataframe(df_ex, use_container_width=True, hide_index=True)
-
-    excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"))
-    st.download_button(
-        label="📥 Descargar Excel Consolidado (4 Cortes — Sin Duplicados)",
-        data=excel_data,
-        file_name=f"Operacion_Vertice_4_Cortes_{datetime.now().strftime('%d%b%y_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
