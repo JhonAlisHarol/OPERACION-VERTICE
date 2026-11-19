@@ -1,5 +1,6 @@
 import re
 import io
+import hashlib
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -78,6 +79,55 @@ SENAFRONT_BOS = {
     "BO-4", "BO-5", "BO-6", "BO-11", "BO-15", "BO-53", "BO-54", "BO-59", "BO-60", "BO-61"
 }
 
+def extraer_texto_archivos(archivos_subidos) -> str:
+    """Extrae texto de archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT."""
+    if not archivos_subidos:
+        return ""
+    partes = []
+    for f in archivos_subidos:
+        nombre = (f.name or "").lower()
+        raw = f.getvalue()
+        if nombre.endswith(".pdf"):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(io.BytesIO(raw))
+                for pg in reader.pages:
+                    t = pg.extract_text() or ""
+                    if t.strip():
+                        partes.append(t)
+            except Exception as e:
+                partes.append(f"[Error leyendo PDF {f.name}: {e}]")
+        elif nombre.endswith(".docx"):
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(raw))
+                for p in doc.paragraphs:
+                    if p.text.strip():
+                        partes.append(p.text)
+                for tbl in doc.tables:
+                    for row in tbl.rows:
+                        partes.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
+            except Exception as e:
+                partes.append(f"[Error leyendo DOCX {f.name}: {e}]")
+        elif nombre.endswith(".xlsx") or nombre.endswith(".xls"):
+            try:
+                xls = pd.ExcelFile(io.BytesIO(raw))
+                for sh in xls.sheet_names:
+                    df_s = pd.read_excel(xls, sheet_name=sh)
+                    partes.append(f"--- HOJA: {sh} ---")
+                    partes.append(df_s.fillna("").to_string(index=False))
+            except Exception as e:
+                partes.append(f"[Error leyendo Excel {f.name}: {e}]")
+        elif nombre.endswith(".csv"):
+            try:
+                df_c = pd.read_csv(io.BytesIO(raw))
+                partes.append(df_c.fillna("").to_string(index=False))
+            except Exception:
+                partes.append(raw.decode("utf-8", errors="ignore"))
+        else:
+            partes.append(raw.decode("utf-8", errors="ignore"))
+    return "\n".join(partes)
+
 def detectar_institucion(bo_code: str, texto: str) -> str:
     t_up = texto.upper()
     if any(k in t_up for k in ["SENAFRONT", "CENTINELAS DE LA PATRIA", "BRIGADA", "BRIOCC", "B.G.M.Q.V", "BACTA"]):
@@ -125,20 +175,16 @@ def detectar_corte(texto: str) -> str:
     return "Corte 2 (12:00-17:25)"
 
 def enmascarar_identificadores(texto_up: str) -> str:
-    """Evita que placas, cédulas/CIP, horas, fechas o números de boleta/artículo se cuenten como cantidades."""
     s = re.sub(r"\b\d{2}\d{2}\d{2}NOV\d{2,4}\b", " [TS] ", texto_up)
     s = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " [FECHA] ", s)
     s = re.sub(r"\b\d{1,2}:\d{2}(?:\s*(?:A\.?M\.?|P\.?M\.?|HRS?))?\b", " [HORA] ", s)
     s = re.sub(r"B/\.?\s*\d+(?:\.\d{1,2})?", " [MONTO] ", s)
-    # Cédulas / CIP / Pasaportes (ej. 8-872-2445, 4-788-2101, E-8-91652)
     s = re.sub(r"\b(?:[A-Z]-)?\d{1,2}-\d{3,5}-\d{3,5}\b", " [ID] ", s)
-    # Boleta #, Infracción #, Falta #, Artículo #, Código #, Oficio #
     s = re.sub(
         r"(?:BOLETA|INFRACCI[ÓO]N|FALTA|ART[ÍI]CULO|ARTICULO|C[ÓO]DIGO|OFICIO|SUBROGADO)\s*(?:N[°º#.\s-]*|INCISO\s*[A-Z]?\s*)?[A-Z0-9-]*",
         " [COD] ",
         s
     )
-    # Placas / matrículas / metálicas
     s = re.sub(
         r"(?:PLACA|MATR[ÍI]CULA|MATRICULA|MET[ÁA]LICA|METALICA)\s*(?:N[°º#.\s-]*)?[A-Z]{1,3}\d{1,6}|\b[A-Z]{2}\d{3,6}\b|\b\d{6}\b",
         " [PLACA] ",
@@ -146,21 +192,52 @@ def enmascarar_identificadores(texto_up: str) -> str:
     )
     return s
 
-def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
+def calcular_huella_exacta(texto: str) -> str:
+    limpio = re.sub(r"[^a-z0-9áéíóúñü]+", " ", texto.lower()).strip()
+    limpio = re.sub(r"\s+", " ", limpio)
+    return hashlib.md5(limpio.encode("utf-8")).hexdigest()
+
+def extraer_claves_entidad(corte: str, bo_code: str, b_up: str) -> list[str]:
+    claves = []
+    for ced in re.findall(r"\b(?:[A-Z]-)?\d{1,2}-\d{3,5}-\d{3,5}\b", b_up):
+        claves.append(f"{corte}|{bo_code}|ID:{ced}")
+    for pas in re.findall(r"\b[A-Z]{2}\d{5,8}\b", b_up):
+        claves.append(f"{corte}|{bo_code}|PAS:{pas}")
+    for pl in re.findall(r"(?:PLACA|MATR[ÍI]CULA|MATRICULA|MET[ÁA]LICA|METALICA)\s*(?:N[°º#.\s-]*)?([A-Z]{1,3}\d{1,6}|\d{4,6})\b", b_up):
+        claves.append(f"{corte}|{bo_code}|PLACA:{pl}")
+    for bol in re.findall(r"(?:BOLETA|OFICIO|SUBROGADO)\s*(?:N[°º#.\s-]*)?([A-Z0-9-]{2,20})\b", b_up):
+        if bol not in {"DE", "DEL", "POR", "SIN", "EN", "LA", "EL", "NO", "SI"}:
+            claves.append(f"{corte}|{bo_code}|DOC:{bol}")
+    return claves
+
+def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
     bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
     filas = []
-    vistos_exactos = set()
-    huellas_sin_id = set()
+
+    huellas_vistas = set()
+    entidades_vistas = set()
+    semantica_sin_id = set()
+
+    stats = {
+        "total_bloques": 0,
+        "duplicados_exactos": 0,
+        "duplicados_entidad": 0,
+        "duplicados_semanticos": 0,
+        "rutina_o_vacio": 0,
+        "unicos_validos": 0,
+    }
 
     for b in bloques:
         b = b.strip()
         if not b or not b.startswith("BO-"):
             continue
+        stats["total_bloques"] += 1
 
-        huella = re.sub(r"\s+", " ", b.lower()).strip()
-        if huella in vistos_exactos:
+        huella = calcular_huella_exacta(b)
+        if huella in huellas_vistas:
+            stats["duplicados_exactos"] += 1
             continue
-        vistos_exactos.add(huella)
+        huellas_vistas.add(huella)
 
         lineas = [l.strip() for l in b.splitlines() if l.strip()]
         encabezado = lineas[0]
@@ -172,26 +249,30 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
         b_up = b.upper()
         b_mask = enmascarar_identificadores(b_up)
 
-        # Mensajes genéricos de rutina sin placa, cédula ni código de boleta
         es_rutina = bool(re.search(r"NOS MANTENEMOS\s+(?:EN\s+LA\s+)?REALIZANDO\s+(?:UNA\s+)?BOLETA", b_up)) and not any(
             tok in b_mask for tok in ["[PLACA]", "[ID]", "[COD]"]
         )
         if es_rutina or any(k in b_up for k in ["SE PUEDEN REGISTRAR INFRACCIONES", "NO SE MANTIENE BASTÓN", "NO SE MANTIENE BASTON"]):
+            stats["rutina_o_vacio"] += 1
             continue
 
-        # 1. Conducción / Captura / Cintillo / Oficio
+        claves_ent = extraer_claves_entidad(corte, bo_code, b_up)
+        if claves_ent and all(k in entidades_vistas for k in claves_ent):
+            stats["duplicados_entidad"] += 1
+            continue
+        for k in claves_ent:
+            entidades_vistas.add(k)
+
         oficios = 1 if any(k in b_up for k in [
             "OFICIO DE CONDUCCI", "OFICIO DE CAPTURA", "OFICIO JUDICIAL", "OFICIO DE SUBROGADO",
             "CONDUCCI[ÓO]N JUDICIAL", "APREHENSI[ÓO]N POR OFICIO", "CINTILLO ROJO", "OFICIO N"
         ]) else 0
 
-        # 2. Faltas administrativas / Indocumentados / Migración / Salud / Citación
         faltas_admin = 1 if any(k in b_up for k in [
             "INDOCUMENTADO", "SIN DOCUMENTO", "ESTAD[ÍI]A VENCIDA", "MIGRACI[ÓO]N", "S.N.M", "SNM",
             "ACTA DE INSPECCI[ÓO]N SANITARIA", "MINSA", "BOLETA DE CITACI[ÓO]N", "C.V.I", "ETRM"
         ]) else 0
 
-        # 3. Vehículos removidos en grúa
         m_grua_cnt = re.search(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A)\s*[:=\s-]*(\d{1,2})\b", b_mask)
         if m_grua_cnt:
             gruas = int(m_grua_cnt.group(1))
@@ -200,7 +281,6 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
         else:
             gruas = 0
 
-        # 4. Infracciones de tránsito (nunca toma placas ni números de boleta como cantidad)
         infracciones = 0
         if not re.search(r"(?:INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|BOLETAS\s+PUESTAS)\s*[:=\s(-]*0+\b", b_mask):
             m_cnt_antes = re.findall(r"\b(\d{1,3})\s*(?:BOLETAS?|INFRACCIONES?|SANCIONES?)\b", b_mask)
@@ -216,15 +296,14 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
             ]):
                 infracciones = 1
 
-        # Evitar doble conteo de boletas sin ID/placa repetidas en el mismo BO
         if infracciones == 1 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
-            clave_dup = f"{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_mask[:80])}"
-            if clave_dup in huellas_sin_id:
+            firma_sem = f"{corte}|{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_mask[:80])}"
+            if firma_sem in semantica_sin_id:
+                stats["duplicados_semanticos"] += 1
                 infracciones = 0
             else:
-                huellas_sin_id.add(clave_dup)
+                semantica_sin_id.add(firma_sem)
 
-        # 5. Personas verificadas
         personas = 0
         for pat in [
             r"\bPERSONAS(?:\s+VERIFICADAS)?\s*[:=\s.-]*(\d{1,4})\b",
@@ -235,7 +314,6 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
             if found_p:
                 personas = max(personas, sum(int(x) for x in found_p))
 
-        # 6. Vehículos verificados
         vehiculos = 0
         for pat in [
             r"\bVEH[ÍI]CULOS(?:\s+VERIFICADOS|\s+PARTICULARES|\s+NACIONALES|\s+EXTRANJEROS)?\s*[:=\s.-]*(\d{1,4})\b",
@@ -248,11 +326,11 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
             if found_v:
                 vehiculos += sum(int(x) for x in found_v)
 
-        # 7. Otras acciones (armamento con permiso, inspecciones, controles especiales)
         otras = 1 if (oficios == 0 and faltas_admin == 0 and gruas == 0 and infracciones == 0 and personas == 0 and vehiculos == 0 and any(
             k in b_up for k in ["ARMA", "PERMISO", "INSPECCI", "PROFILAXIS", "325", "NARC[ÓO]TICOS", "ADUANAS", "MIDA"]
         )) else 0
 
+        stats["unicos_validos"] += 1
         filas.append({
             "Corte": corte,
             "Institución": inst,
@@ -267,7 +345,7 @@ def analizar_reportes_texto(texto_crudo: str) -> pd.DataFrame:
             "Detalle": " ".join(lineas[1:])[:320]
         })
 
-    return pd.DataFrame(filas)
+    return pd.DataFrame(filas), stats
 
 def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
     wb = openpyxl.Workbook()
@@ -572,7 +650,7 @@ if "df_vertice_extra" in st.session_state and not st.session_state["df_vertice_e
     vals_act["vehiculos"] += int(sub_ex["Vehículos Verificados"].sum())
     vals_act["otras"] += int(sub_ex["Otras Acciones"].sum())
 
-tab_pres, tab_proc = st.tabs(["📊 Presentación Ejecutiva (CON-C5)", "📥 Cargar Textos y Exportar Excel"])
+tab_pres, tab_proc = st.tabs(["📊 Presentación Ejecutiva (CON-C5)", "📥 Cargar Textos, PDF / Word / Excel"])
 
 with tab_pres:
     c1, c2, c3, c4 = st.columns([1.0, 1.1, 1.8, 1.3])
@@ -674,16 +752,33 @@ with tab_pres:
         """, unsafe_allow_html=True)
 
 with tab_proc:
+    archivos_subidos = st.file_uploader(
+        "Cargar archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT:",
+        type=["pdf", "docx", "xlsx", "xls", "csv", "txt"],
+        accept_multiple_files=True
+    )
     texto_pegar = st.text_area(
-        "Pega aquí los textos de reportes operativos (sin confundir placas, cédulas ni números de boleta con cantidades):",
-        height=240,
+        "O pega aquí directamente los textos de reportes operativos:",
+        height=210,
         placeholder="- BO-53-Chepo (Entrada principal)..."
     )
-    if st.button("⚙️ Analizar Reportes y Actualizar Presentación", type="primary"):
-        if texto_pegar.strip():
-            df_ex = analizar_reportes_texto(texto_pegar)
+
+    if st.button("⚙️ Analizar Texto / Archivos y Actualizar Presentación", type="primary"):
+        texto_archivos = extraer_texto_archivos(archivos_subidos)
+        texto_combinado = "\n".join(x for x in [texto_archivos, texto_pegar] if x and x.strip())
+
+        if not texto_combinado.strip():
+            st.warning("Pega algún texto o sube un archivo PDF, Word o Excel antes de analizar.")
+        else:
+            df_ex, stats_dup = analizar_reportes_texto(texto_combinado)
             st.session_state["df_vertice_extra"] = df_ex
-            st.success(f"✅ {len(df_ex)} reportes únicos analizados con precisión.")
+            st.session_state["stats_dup"] = stats_dup
+            st.success(f"✅ {stats_dup['unicos_validos']} registros únicos analizados de {stats_dup['total_bloques']} bloques detectados.")
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Duplicados Exactos", stats_dup["duplicados_exactos"])
+            d2.metric("Duplicados por Placa/ID/Boleta", stats_dup["duplicados_entidad"])
+            d3.metric("Duplicados Semánticos", stats_dup["duplicados_semanticos"])
+            d4.metric("Rutina / Sin Boleta", stats_dup["rutina_o_vacio"])
             st.dataframe(df_ex, use_container_width=True, hide_index=True)
 
     excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"))
