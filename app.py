@@ -80,7 +80,6 @@ SENAFRONT_BOS = {
 }
 
 def extraer_texto_archivos(archivos_subidos) -> str:
-    """Extrae texto de archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT."""
     if not archivos_subidos:
         return ""
     partes = []
@@ -180,11 +179,8 @@ def enmascarar_identificadores(texto_up: str) -> str:
     s = re.sub(r"\b\d{1,2}:\d{2}(?:\s*(?:A\.?M\.?|P\.?M\.?|HRS?))?\b", " [HORA] ", s)
     s = re.sub(r"B/\.?\s*\d+(?:\.\d{1,2})?", " [MONTO] ", s)
     s = re.sub(r"\b(?:[A-Z]-)?\d{1,2}-\d{3,5}-\d{3,5}\b", " [ID] ", s)
-    s = re.sub(
-        r"(?:BOLETA|INFRACCI[ÓO]N|FALTA|ART[ÍI]CULO|ARTICULO|C[ÓO]DIGO|OFICIO|SUBROGADO)\s*(?:N[°º#.\s-]*|INCISO\s*[A-Z]?\s*)?[A-Z0-9-]*",
-        " [COD] ",
-        s
-    )
+    s = re.sub(r"(?:ART[ÍI]CULO|ARTICULO|C[ÓO]DIGO|OFICIO|SUBROGADO)\s*(?:N[°º#.\s-]*|INCISO\s*[A-Z]?)?\s*[A-Z0-9-]*", " [COD] ", s)
+    s = re.sub(r"(?:#|N[°º])\s*\d+[A-Z0-9-]*", " [COD] ", s)
     s = re.sub(
         r"(?:PLACA|MATR[ÍI]CULA|MATRICULA|MET[ÁA]LICA|METALICA)\s*(?:N[°º#.\s-]*)?[A-Z]{1,3}\d{1,6}|\b[A-Z]{2}\d{3,6}\b|\b\d{6}\b",
         " [PLACA] ",
@@ -209,6 +205,41 @@ def extraer_claves_entidad(corte: str, bo_code: str, b_up: str) -> list[str]:
         if bol not in {"DE", "DEL", "POR", "SIN", "EN", "LA", "EL", "NO", "SI"}:
             claves.append(f"{corte}|{bo_code}|DOC:{bol}")
     return claves
+
+def calcular_falta_admin_tramitada(b_up: str) -> int:
+    tiene_falta_real = bool(re.search(
+        r"\b(?:INDOCUMENTADO|NO\s+PORTABA\s+C[ÉE]DULA|SIN\s+DOCUMENTO|ESTAD[ÍI]A\s+VENCIDA|FALTA\s+ADMINISTRATIVA|FALTA\s+MIGRATORIA|ACTA\s+DE\s+INSPECCI[ÓO]N\s+SANITARIA|BOLETA\s+DE\s+CITACI[ÓO]N|C\.?V\.?I\.?|ETRM|TRAMITE\s+MIGRATORIO)\b",
+        b_up
+    ))
+    if not tiene_falta_real:
+        return 0
+    if "SIN NOVEDAD" in b_up and not re.search(
+        r"\b(?:TRAMITAD[OA]|REMITID[OA]|CONDUCID[OA]|APREHENDID[OA]|SANCIONAD[OA]|ESTAD[ÍI]A\s+VENCIDA|INDOCUMENTADO|NO\s+PORTABA)\b",
+        b_up
+    ):
+        return 0
+    return 1
+
+def calcular_infracciones_exactas(b_up: str, b_mask: str) -> int:
+    if re.search(r"(?:INFRACCI[ÓO]N(?:ES)?\s*(?:DE\s+TR[ÁA]NSITO)?|BOLETAS?|SANCIONES?)\s*[:=\s(-]*0+\b", b_mask):
+        return 0
+
+    cantidades = []
+    for n in re.findall(r"\b(\d{1,3})\s*(?:BOLETAS?|INFRACCIONES?|SANCIONES?)\b", b_mask):
+        cantidades.append(int(n))
+    for n in re.findall(r"(?:INFRACCIONES?\s*(?:DE\s+TR[ÁA]NSITO)?|BOLETAS?|SANCIONES?)\s*[:=\s=-]{1,4}(\d{1,3})\b", b_mask):
+        cantidades.append(int(n))
+
+    if cantidades:
+        return max(cantidades)
+
+    if re.search(
+        r"\b(?:SE\s+COLOCA(?:RON)?\s+INFRACCI|SE\s+REALIZA(?:N)?\s+(?:UNA\s+)?(?:INFRACCI|BOLETA)|SE\s+SANCION|ES\s+SANCION|BOLETA\s+DE\s+INFRACCI|INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|SE\s+LE\s+RETIRA\s+LICENCIA|SE\s+LE\s+RETIENE\s+LICENCIA|EMBRIAGUEZ\s+COMPROBADA|NO\s+PORTABA\s+LICENCIA|LICENCIA\s+VENCIDA|DESACATO|VIDRIOS\s+AHUMADOS|GIRO\s+INDEBIDO)\b",
+        b_up
+    ):
+        return 1
+
+    return 0
 
 def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
     bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
@@ -268,10 +299,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
             "CONDUCCI[ÓO]N JUDICIAL", "APREHENSI[ÓO]N POR OFICIO", "CINTILLO ROJO", "OFICIO N"
         ]) else 0
 
-        faltas_admin = 1 if any(k in b_up for k in [
-            "INDOCUMENTADO", "SIN DOCUMENTO", "ESTAD[ÍI]A VENCIDA", "MIGRACI[ÓO]N", "S.N.M", "SNM",
-            "ACTA DE INSPECCI[ÓO]N SANITARIA", "MINSA", "BOLETA DE CITACI[ÓO]N", "C.V.I", "ETRM"
-        ]) else 0
+        faltas_admin = calcular_falta_admin_tramitada(b_up)
 
         m_grua_cnt = re.search(r"(?:REMOCI[ÓO]N\s+EN\s+GR[ÚU]A|VEH[ÍI]CULOS?\s+EN\s+GR[ÚU]A|REMOVIDO\s+EN\s+GR[ÚU]A)\s*[:=\s-]*(\d{1,2})\b", b_mask)
         if m_grua_cnt:
@@ -281,20 +309,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
         else:
             gruas = 0
 
-        infracciones = 0
-        if not re.search(r"(?:INFRACCI[ÓO]N\s+DE\s+TR[ÁA]NSITO|BOLETAS\s+PUESTAS)\s*[:=\s(-]*0+\b", b_mask):
-            m_cnt_antes = re.findall(r"\b(\d{1,3})\s*(?:BOLETAS?|INFRACCIONES?|SANCIONES?)\b", b_mask)
-            m_cnt_despues = re.findall(r"\b(?:BOLETAS?|INFRACCIONES?\s+DE\s+TR[ÁA]NSITO|SANCIONES?)\s*[:=\s-]+(\d{1,3})\b", b_mask)
-            if m_cnt_despues:
-                infracciones = sum(int(x) for x in m_cnt_despues)
-            elif m_cnt_antes:
-                infracciones = sum(int(x) for x in m_cnt_antes)
-            elif any(k in b_up for k in [
-                "SE COLOCA INFRACCI", "SE REALIZA INFRACCI", "SE REALIZA BOLETA",
-                "SE SANCION", "ES SANCION", "BOLETA DE INFRACCI", "INFRACCI[ÓO]N DE TR[ÁA]NSITO",
-                "SE LE RETIRA LICENCIA", "SE LE RETIENE LICENCIA", "EMBRIAGUEZ COMPROBADA"
-            ]):
-                infracciones = 1
+        infracciones = calcular_infracciones_exactas(b_up, b_mask)
 
         if infracciones == 1 and not any(tok in b_mask for tok in ["[PLACA]", "[ID]"]):
             firma_sem = f"{corte}|{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_mask[:80])}"
@@ -313,6 +328,8 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
             found_p = re.findall(pat, b_mask)
             if found_p:
                 personas = max(personas, sum(int(x) for x in found_p))
+        if personas == 0 and ("PERSONA VERIFICADA" in b_up or "CIUDADANO VERIFICADO" in b_up):
+            personas = 1
 
         vehiculos = 0
         for pat in [
@@ -338,7 +355,7 @@ def analizar_reportes_texto(texto_crudo: str) -> tuple[pd.DataFrame, dict]:
             "Oficios / Capturas": oficios,
             "Infracciones": infracciones,
             "Grúas": gruas,
-            "Faltas Admin / Indoc": faltas_admin,
+            "Faltas Admin / Tramitados": faltas_admin,
             "Personas Verificadas": personas,
             "Vehículos Verificados": vehiculos,
             "Otras Acciones": otras,
@@ -411,48 +428,46 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None, modo_carga: 
         c.alignment = al_center
         c.border = border_cell
 
-    reemplazar = (modo_carga == "Reemplazar valores base") and (df_extra is not None)
-
-    def val_celda(base_v, col_k, corte_lbl):
-        ex_v = int(df_extra[df_extra["Corte"] == corte_lbl][col_k].sum()) if (df_extra is not None and not df_extra.empty) else 0
-        return ex_v if reemplazar else (base_v + ex_v)
+    def valor_celda(base_val, col_k, corte_lbl):
+        ex = int(df_extra[df_extra["Corte"] == corte_lbl][col_k].sum()) if (df_extra is not None and not df_extra.empty) else 0
+        return ex if modo_carga == "Reemplazar valores base" else base_val + ex
 
     filas_res = [
         ("Personas Solicitadas / Capturas (Oficios)",
-         val_celda(3, "Oficios / Capturas", "Corte 1 (06:00-11:59)"),
-         val_celda(4, "Oficios / Capturas", "Corte 2 (12:00-17:25)"),
-         val_celda(6, "Oficios / Capturas", "Corte 3 (17:26-23:59)"),
-         val_celda(1, "Oficios / Capturas", "Corte 4 (00:00-06:00)"),
+         valor_celda(3, "Oficios / Capturas", "Corte 1 (06:00-11:59)"),
+         valor_celda(4, "Oficios / Capturas", "Corte 2 (12:00-17:25)"),
+         valor_celda(6, "Oficios / Capturas", "Corte 3 (17:26-23:59)"),
+         valor_celda(1, "Oficios / Capturas", "Corte 4 (00:00-06:00)"),
          "=SUM(B5:E5)", "8 PN / 6 SNF", "3 + 4 + 6 + 1 = 14 capturas por oficio"),
         ("Infracciones de Tránsito Registradas",
-         val_celda(14, "Infracciones", "Corte 1 (06:00-11:59)"),
-         val_celda(62, "Infracciones", "Corte 2 (12:00-17:25)"),
-         val_celda(54, "Infracciones", "Corte 3 (17:26-23:59)"),
-         val_celda(6, "Infracciones", "Corte 4 (00:00-06:00)"),
+         valor_celda(14, "Infracciones", "Corte 1 (06:00-11:59)"),
+         valor_celda(62, "Infracciones", "Corte 2 (12:00-17:25)"),
+         valor_celda(54, "Infracciones", "Corte 3 (17:26-23:59)"),
+         valor_celda(6, "Infracciones", "Corte 4 (00:00-06:00)"),
          "=SUM(B6:E6)", "74 PN / 62 SNF", "14 + 62 + 54 + 6 = 136 (sin 108/12)"),
         ("Vehículos Removidos en Grúa",
-         val_celda(0, "Grúas", "Corte 1 (06:00-11:59)"),
-         val_celda(2, "Grúas", "Corte 2 (12:00-17:25)"),
-         val_celda(1, "Grúas", "Corte 3 (17:26-23:59)"),
-         val_celda(0, "Grúas", "Corte 4 (00:00-06:00)"),
+         valor_celda(0, "Grúas", "Corte 1 (06:00-11:59)"),
+         valor_celda(2, "Grúas", "Corte 2 (12:00-17:25)"),
+         valor_celda(1, "Grúas", "Corte 3 (17:26-23:59)"),
+         valor_celda(0, "Grúas", "Corte 4 (00:00-06:00)"),
          "=SUM(B7:E7)", "3 PN / 0 SNF", "Llano Bonito, Almirante y David BV0753"),
-        ("Faltas Administrativas / Migratorias / Indocumentados",
-         val_celda(0, "Faltas Admin / Indoc", "Corte 1 (06:00-11:59)"),
-         val_celda(5, "Faltas Admin / Indoc", "Corte 2 (12:00-17:25)"),
-         val_celda(2, "Faltas Admin / Indoc", "Corte 3 (17:26-23:59)"),
-         val_celda(0, "Faltas Admin / Indoc", "Corte 4 (00:00-06:00)"),
-         "=SUM(B8:E8)", "SNM / MINSA / PN / SNF", "0 + 5 + 2 + 0 = 7 faltas admin / indocumentados"),
+        ("Faltas Administrativas / Tramitados por Falta",
+         valor_celda(0, "Faltas Admin / Tramitados", "Corte 1 (06:00-11:59)"),
+         valor_celda(5, "Faltas Admin / Tramitados", "Corte 2 (12:00-17:25)"),
+         valor_celda(2, "Faltas Admin / Tramitados", "Corte 3 (17:26-23:59)"),
+         valor_celda(0, "Faltas Admin / Tramitados", "Corte 4 (00:00-06:00)"),
+         "=SUM(B8:E8)", "SNM / MINSA / PN / SNF", "Solo ciudadanos/casos tramitados por falta"),
         ("Personas Verificadas (Conteo Depurado)",
-         val_celda(0, "Personas Verificadas", "Corte 1 (06:00-11:59)"),
-         val_celda(2268, "Personas Verificadas", "Corte 2 (12:00-17:25)"),
-         val_celda(1528, "Personas Verificadas", "Corte 3 (17:26-23:59)"),
-         val_celda(213, "Personas Verificadas", "Corte 4 (00:00-06:00)"),
+         valor_celda(0, "Personas Verificadas", "Corte 1 (06:00-11:59)"),
+         valor_celda(2268, "Personas Verificadas", "Corte 2 (12:00-17:25)"),
+         valor_celda(1528, "Personas Verificadas", "Corte 3 (17:26-23:59)"),
+         valor_celda(213, "Personas Verificadas", "Corte 4 (00:00-06:00)"),
          "=SUM(B9:E9)", "PN + SENAFRONT", "2,268 + 1,528 + 213 = 4,009 personas"),
         ("Vehículos Verificados (Conteo Depurado)",
-         val_celda(0, "Vehículos Verificados", "Corte 1 (06:00-11:59)"),
-         val_celda(1741, "Vehículos Verificados", "Corte 2 (12:00-17:25)"),
-         val_celda(852, "Vehículos Verificados", "Corte 3 (17:26-23:59)"),
-         val_celda(145, "Vehículos Verificados", "Corte 4 (00:00-06:00)"),
+         valor_celda(0, "Vehículos Verificados", "Corte 1 (06:00-11:59)"),
+         valor_celda(1741, "Vehículos Verificados", "Corte 2 (12:00-17:25)"),
+         valor_celda(852, "Vehículos Verificados", "Corte 3 (17:26-23:59)"),
+         valor_celda(145, "Vehículos Verificados", "Corte 4 (00:00-06:00)"),
          "=SUM(B10:E10)", "PN + SENAFRONT", "1,741 + 852 + 145 = 2,738 vehículos"),
     ]
 
@@ -616,9 +631,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if "modo_carga_vertice" not in st.session_state:
-    st.session_state["modo_carga_vertice"] = "Sumar como reporte nuevo"
-
 col_b_izq, col_b_der = st.columns([3.4, 1.1])
 with col_b_izq:
     st.markdown("""
@@ -641,86 +653,25 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+if "modo_carga" not in st.session_state:
+    st.session_state["modo_carga"] = "Sumar como reporte nuevo"
+
+vals_act = BASE_VALORES[grupo_sel].copy() if st.session_state["modo_carga"] == "Sumar como reporte nuevo" else {
+    "oficios": 0, "infracciones": 0, "gruas": 0, "faltas_admin": 0, "personas": 0, "vehiculos": 0, "otras": 0
+}
+
+if "df_vertice_extra" in st.session_state and not st.session_state["df_vertice_extra"].empty:
+    df_ex = st.session_state["df_vertice_extra"]
+    sub_ex = df_ex if grupo_sel == "Consolidado" else df_ex[df_ex["Corte"] == grupo_sel]
+    vals_act["oficios"] += int(sub_ex["Oficios / Capturas"].sum())
+    vals_act["infracciones"] += int(sub_ex["Infracciones"].sum())
+    vals_act["gruas"] += int(sub_ex["Grúas"].sum())
+    vals_act["faltas_admin"] += int(sub_ex["Faltas Admin / Tramitados"].sum())
+    vals_act["personas"] += int(sub_ex["Personas Verificadas"].sum())
+    vals_act["vehiculos"] += int(sub_ex["Vehículos Verificados"].sum())
+    vals_act["otras"] += int(sub_ex["Otras Acciones"].sum())
+
 tab_pres, tab_proc = st.tabs(["📊 Presentación Ejecutiva (CON-C5)", "📥 Cargar Textos, PDF / Word / Excel"])
-
-with tab_proc:
-    modo_carga = st.radio(
-        "Modo de actualización al cargar o pegar datos:",
-        options=["Sumar como reporte nuevo", "Reemplazar valores base"],
-        index=0 if st.session_state["modo_carga_vertice"] == "Sumar como reporte nuevo" else 1,
-        horizontal=True
-    )
-    st.session_state["modo_carga_vertice"] = modo_carga
-
-    archivos_subidos = st.file_uploader(
-        "Cargar archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT (actualización automática):",
-        type=["pdf", "docx", "xlsx", "xls", "csv", "txt"],
-        accept_multiple_files=True,
-        key="uploader_vertice_auto"
-    )
-    texto_pegar = st.text_area(
-        "O pega aquí directamente los textos de reportes operativos (actualización automática):",
-        height=210,
-        placeholder="- BO-53-Chepo (Entrada principal)...",
-        key="texto_vertice_auto"
-    )
-
-    texto_archivos = extraer_texto_archivos(archivos_subidos)
-    texto_combinado = "\n".join(x for x in [texto_archivos, texto_pegar] if x and x.strip())
-
-    if texto_combinado.strip():
-        df_ex, stats_dup = analizar_reportes_texto(texto_combinado)
-        st.session_state["df_vertice_extra"] = df_ex
-        st.session_state["stats_dup"] = stats_dup
-        st.info(f"⚡ Actualización automática activa ({modo_carga}): {stats_dup['unicos_validos']} registros únicos de {stats_dup['total_bloques']} bloques detectados.")
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Duplicados Exactos", stats_dup["duplicados_exactos"])
-        d2.metric("Duplicados por Placa/ID/Boleta", stats_dup["duplicados_entidad"])
-        d3.metric("Duplicados Semánticos", stats_dup["duplicados_semanticos"])
-        d4.metric("Rutina / Sin Boleta", stats_dup["rutina_o_vacio"])
-        st.dataframe(df_ex, use_container_width=True, hide_index=True)
-    else:
-        st.session_state["df_vertice_extra"] = None
-        st.session_state["stats_dup"] = None
-
-    excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"), st.session_state["modo_carga_vertice"])
-    st.download_button(
-        label="📥 Descargar Excel Consolidado (4 Cortes — Sin Duplicados)",
-        data=excel_data,
-        file_name=f"Operacion_Vertice_4_Cortes_{datetime.now().strftime('%d%b%y_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-vals_act = BASE_VALORES[grupo_sel].copy()
-df_ex_act = st.session_state.get("df_vertice_extra")
-modo_act = st.session_state.get("modo_carga_vertice", "Sumar como reporte nuevo")
-
-if df_ex_act is not None:
-    sub_ex = df_ex_act if grupo_sel == "Consolidado" else df_ex_act[df_ex_act["Corte"] == grupo_sel]
-    ex_oficios = int(sub_ex["Oficios / Capturas"].sum()) if not sub_ex.empty else 0
-    ex_inf = int(sub_ex["Infracciones"].sum()) if not sub_ex.empty else 0
-    ex_gruas = int(sub_ex["Grúas"].sum()) if not sub_ex.empty else 0
-    ex_faltas = int(sub_ex["Faltas Admin / Indoc"].sum()) if not sub_ex.empty else 0
-    ex_pers = int(sub_ex["Personas Verificadas"].sum()) if not sub_ex.empty else 0
-    ex_veh = int(sub_ex["Vehículos Verificados"].sum()) if not sub_ex.empty else 0
-    ex_otras = int(sub_ex["Otras Acciones"].sum()) if not sub_ex.empty else 0
-
-    if modo_act == "Reemplazar valores base":
-        vals_act["oficios"] = ex_oficios
-        vals_act["infracciones"] = ex_inf
-        vals_act["gruas"] = ex_gruas
-        vals_act["faltas_admin"] = ex_faltas
-        vals_act["personas"] = ex_pers
-        vals_act["vehiculos"] = ex_veh
-        vals_act["otras"] = ex_otras
-    else:
-        vals_act["oficios"] += ex_oficios
-        vals_act["infracciones"] += ex_inf
-        vals_act["gruas"] += ex_gruas
-        vals_act["faltas_admin"] += ex_faltas
-        vals_act["personas"] += ex_pers
-        vals_act["vehiculos"] += ex_veh
-        vals_act["otras"] += ex_otras
 
 with tab_pres:
     c1, c2, c3, c4 = st.columns([1.0, 1.1, 1.8, 1.3])
@@ -762,7 +713,7 @@ with tab_pres:
             </div>
             <div>
               <div class="kpi-big kpi-amber" style="font-size:32px;">{vals_act['faltas_admin']}</div>
-              <div class="kpi-lbl" style="font-size:10px;">FALTAS ADMIN / INDOC</div>
+              <div class="kpi-lbl" style="font-size:10px;">TRAMITADOS POR FALTA</div>
               <div style="color:#94A3B8; font-size:10px; text-align:center;">{grupo_sel}</div>
             </div>
           </div>
@@ -801,9 +752,9 @@ with tab_pres:
         st.dataframe(df_acc_det, use_container_width=True, hide_index=True)
 
     with b2:
-        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE FALTAS, GRÚAS E INFRACCIONES</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-box amber"><div class="panel-hdr" style="text-align:left;padding-left:12px;">DETALLE DE TRAMITADOS POR FALTA, GRÚAS E INFRACCIONES</div></div>', unsafe_allow_html=True)
         df_inc_det = pd.DataFrame([
-            {"Tipo": "Faltas administrativas / Indocumentados / Migración", "Total": vals_act["faltas_admin"]},
+            {"Tipo": "Ciudadanos tramitados por falta / Indocumentados / Migración", "Total": vals_act["faltas_admin"]},
             {"Tipo": "Vehículos removidos en grúa", "Total": vals_act["gruas"]},
             {"Tipo": "Infracciones de tránsito", "Total": vals_act["infracciones"]},
         ])
@@ -820,3 +771,54 @@ with tab_pres:
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+with tab_proc:
+    modo_sel = st.radio(
+        "Modo de actualización al cargar o pegar:",
+        options=["Sumar como reporte nuevo", "Reemplazar valores base"],
+        index=0 if st.session_state["modo_carga"] == "Sumar como reporte nuevo" else 1,
+        horizontal=True
+    )
+    st.session_state["modo_carga"] = modo_sel
+
+    archivos_subidos = st.file_uploader(
+        "Cargar archivos PDF, Word (.docx), Excel (.xlsx/.xls), CSV o TXT:",
+        type=["pdf", "docx", "xlsx", "xls", "csv", "txt"],
+        accept_multiple_files=True,
+        key="uploader_vertice"
+    )
+    texto_pegar = st.text_area(
+        "O pega aquí directamente los textos de reportes operativos:",
+        height=200,
+        placeholder="- BO-53-Chepo (Entrada principal)...",
+        key="textarea_vertice"
+    )
+
+    texto_archivos = extraer_texto_archivos(archivos_subidos)
+    texto_combinado = "\n".join(x for x in [texto_archivos, texto_pegar] if x and x.strip())
+
+    if texto_combinado.strip():
+        firma_actual = hashlib.md5(f"{modo_sel}||{texto_combinado}".encode("utf-8")).hexdigest()
+        if st.session_state.get("ultima_firma_procesada") != firma_actual:
+            df_ex, stats_dup = analizar_reportes_texto(texto_combinado)
+            st.session_state["df_vertice_extra"] = df_ex
+            st.session_state["stats_dup"] = stats_dup
+            st.session_state["ultima_firma_procesada"] = firma_actual
+
+    if "df_vertice_extra" in st.session_state and not st.session_state["df_vertice_extra"].empty:
+        stats_dup = st.session_state.get("stats_dup", {})
+        st.success(f"✅ Presentación actualizada automáticamente ({modo_sel}): {stats_dup.get('unicos_validos', len(st.session_state['df_vertice_extra']))} registros únicos.")
+        st.dataframe(st.session_state["df_vertice_extra"], use_container_width=True, hide_index=True)
+        if st.button("🧹 Limpiar datos cargados / pegados"):
+            st.session_state.pop("df_vertice_extra", None)
+            st.session_state.pop("stats_dup", None)
+            st.session_state.pop("ultima_firma_procesada", None)
+            st.rerun()
+
+    excel_data = generar_excel_consolidado(st.session_state.get("df_vertice_extra"), st.session_state["modo_carga"])
+    st.download_button(
+        label="📥 Descargar Excel Consolidado (4 Cortes — Sin Duplicados)",
+        data=excel_data,
+        file_name=f"Operacion_Vertice_4_Cortes_{datetime.now().strftime('%d%b%y_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
