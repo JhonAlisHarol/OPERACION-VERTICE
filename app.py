@@ -5,7 +5,6 @@ import pandas as pd
 import streamlit as st
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import CellIsRule
 
 # ==============================================================================
@@ -161,7 +160,6 @@ def parsear_reportes_sin_duplicados(texto_crudo: str) -> pd.DataFrame:
         if not b or not b.startswith("BO-"):
             continue
 
-        # 1. Deduplicación exacta normalizada
         huella = re.sub(r"\s+", " ", b.lower()).strip()
         if huella in vistos_exactos:
             continue
@@ -175,7 +173,6 @@ def parsear_reportes_sin_duplicados(texto_crudo: str) -> pd.DataFrame:
         inst = detectar_institucion(bo_code, b)
         b_up = b.upper()
 
-        # Ignorar mensajes genéricos de rutina sin placa, cédula ni boleta
         es_rutina = bool(re.search(r"NOS MANTENEMOS\s+(?:EN\s+LA\s+)?REALIZANDO\s+(?:UNA\s+)?BOLETA", b_up)) and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C[ÉE]DULA|C\.I\.P|N°\s*\d+|#\d+)", b_up)
         if es_rutina or any(k in b_up for k in ["SE PUEDEN REGISTRAR INFRACCIONES", "NO SE MANTIENE BASTÓN", "NO SE MANTIENE BASTON"]):
             continue
@@ -197,7 +194,6 @@ def parsear_reportes_sin_duplicados(texto_crudo: str) -> pd.DataFrame:
             elif any(k in b_up for k in ["INFRACCIÓN", "INFRACCION", "BOLETA #", "BOLETA N", "ARTÍCULO 240", "ARTICULO 240", "ARTÍCULO 132", "ARTICULO 132", "SANCIONADO", "SANCIONÓ"]):
                 boletas = 1
 
-        # Deduplicación semántica de boletas reenviadas con distinta redacción en el mismo sector
         if boletas == 1 and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C\.I\.P|C[ÉE]DULA|BOLETA\s*#?\s*\d+)", b_up):
             firma = f"{bo_code}|{re.sub(r'[^A-Z0-9]', '', b_up[:90])}"
             if firma in huellas_boletas:
@@ -241,7 +237,6 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
     SUBHEADER_STEEL = "3A608F"
     SECTION_SAGE = "2E5A53"
     ZEBRA_LIGHT = "F7F9FC"
-    SUBTOTAL_TINT = "EEF3F8"
     TOTAL_GRAY = "E4E9F0"
     BORDER_GRAY = "CBD5E1"
 
@@ -258,20 +253,17 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
     fill_sec = PatternFill(start_color=SECTION_SAGE, end_color=SECTION_SAGE, fill_type="solid")
     fill_zebra = PatternFill(start_color=ZEBRA_LIGHT, end_color=ZEBRA_LIGHT, fill_type="solid")
     fill_white = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-    fill_sub = PatternFill(start_color=SUBTOTAL_TINT, end_color=SUBTOTAL_TINT, fill_type="solid")
     fill_tot = PatternFill(start_color=TOTAL_GRAY, end_color=TOTAL_GRAY, fill_type="solid")
 
     thin = Side(style="thin", color=BORDER_GRAY)
     med_navy = Side(style="medium", color=HEADER_DARK)
     double_navy = Side(style="double", color=HEADER_DARK)
     border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
-    border_sub = Border(left=thin, right=thin, top=med_navy, bottom=med_navy)
     border_tot = Border(left=thin, right=thin, top=med_navy, bottom=double_navy)
 
     al_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
     al_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # Pestaña 1: Resumen Ejecutivo 4 Cortes
     ws_res = wb.active
     ws_res.title = "Resumen Ejecutivo 4 Cortes"
     ws_res.views.sheetView[0].showGridLines = True
@@ -364,7 +356,7 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
                 c.font = font_reg
                 c.alignment = al_left
 
-    # Desglose por Sector de Infracciones (Corte 3 = 54 | Corte 4 = 6)
+    # Sección por Sector de Infracciones (evitando escribir .value en MergedCell)
     ws_res.merge_cells("A12:H12")
     ws_res["A12"] = "DESGLOSE DE INFRACCIONES POR SECTOR (BO) — CORTE 3 (54) Y CORTE 4 (6)"
     ws_res["A12"].font = font_sec
@@ -372,15 +364,16 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
     ws_res["A12"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
     ws_res.row_dimensions[12].height = 24
 
-    hdr_sec = ["Sector / Punto de Control (BO)", "Institución", "Corte 3", "Corte 4", "Total C3+C4", "Detalle Operativo", "", ""]
+    hdr_sec = ["Sector / Punto de Control (BO)", "Institución", "Corte 3", "Corte 4", "Total C3+C4", "Detalle Operativo"]
     ws_res.merge_cells("F13:H13")
     ws_res.row_dimensions[13].height = 24
     for idx, h in enumerate(hdr_sec, 1):
         c = ws_res.cell(row=13, column=idx, value=h)
         c.font = font_hdr
-        c.fill = fill_hdr
         c.alignment = al_center
-        c.border = border_cell
+    for col_c in range(1, 9):
+        ws_res.cell(row=13, column=col_c).fill = fill_hdr
+        ws_res.cell(row=13, column=col_c).border = border_cell
 
     sectores = [
         ("BO-54 - Tanara (Panamá Este)", "SENAFRONT", 8, 2, "C3: 8 boletas (Art. 53A/53D/132C/240, #64, #03) | C4: 2 boletas (#14 y Art. 132C alcoholemia)"),
@@ -451,12 +444,11 @@ def generar_excel_consolidado(df_extra: pd.DataFrame | None = None) -> bytes:
     for col_l, w in zip(["A", "B", "C", "D", "E", "F", "G", "H"], [42, 18, 16, 16, 16, 22, 22, 24]):
         ws_res.column_dimensions[col_l].width = w
 
-    for sheet in wb.worksheets:
-        sheet.page_setup.orientation = sheet.ORIENTATION_LANDSCAPE
-        sheet.page_setup.paperSize = sheet.PAPERSIZE_LETTER
-        sheet.sheet_properties.pageSetUpPr.fitToPage = True
-        sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 0
+    ws_res.page_setup.orientation = ws_res.ORIENTATION_LANDSCAPE
+    ws_res.page_setup.paperSize = ws_res.PAPERSIZE_LETTER
+    ws_res.sheet_properties.pageSetUpPr.fitToPage = True
+    ws_res.page_setup.fitToWidth = 1
+    ws_res.page_setup.fitToHeight = 0
 
     buf = io.BytesIO()
     wb.save(buf)
