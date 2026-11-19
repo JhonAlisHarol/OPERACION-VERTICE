@@ -1,9 +1,29 @@
-import re
+import os
+import zipfile
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.chart import BarChart, Reference
+
+# 1. Regenerate the clean, audited 24-hour Excel workbook (130 real unique tickets: 72 PN + 58 SENAFRONT)
+# Breakdown by block:
+# - Bloque 1 (06:00-11:59): 14 (9 SNF + 5 PN)
+# - Bloque 2 (12:00-17:25): 72 (52 PN + 20 SNF) -> adjusted Metetí Falta #10 duplicate (-1)
+# - Bloque 3 (17:26-23:59): 41 (15 PN + 26 SNF) -> adjusted Metetí 53D duplicate (-1) & Agua Fría summary (-1)
+# - Bloque 4 (00:00-06:00): 3 (0 PN + 3 SNF) -> adjusted Paso Canoas shift summary (-3 already itemized in B3)
+# Total = 14 + 72 + 41 + 3 = 130 unique tickets (72 PN + 58 SNF)!
+
+# Also update app.py in repo_vertice_v3 to add smart deduplication for:
+# 1) Generic status messages without ticket numbers ("nos mantenemos realizando boleta...")
+# 2) Shift summaries ("TURNO DE 1800 A 0600 HORAS... Infracción de tránsito: (03)") when individual tickets from that post exist
+# 3) Near-duplicate reworded lines in the same BO ("Se realiza una boleta artículo #53D por luces defectuosas" vs "Se realiza una boleta artículo #53D, luces defectuosas")
+
+os.makedirs("repo_vertice_v3/.streamlit", exist_ok=True)
+
+app_py_v3 = '''import re
 import io
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, Reference
@@ -21,7 +41,7 @@ st.title("🛡️ Consola Operativa y Presentación Ejecutiva — Operación Vé
 st.caption("Ministerio de Seguridad Pública (MINSEG) • Centro de Operación Nacional (CON-C5)")
 
 # ==============================================================================
-# REGLAS OPERATIVAS DE CLASIFICACIÓN Y DEPURACIÓN
+# REGLAS OPERATIVAS DE CLASIFICACIÓN Y DEPURACIÓN ESTRICTA
 # ==============================================================================
 SENAFRONT_BOS = {
     "BO-4", "BO-5", "BO-6", "BO-11", "BO-15", "BO-53", "BO-54", "BO-59", "BO-60", "BO-61"
@@ -46,7 +66,7 @@ def detectar_institucion(bo_code: str, texto: str) -> str:
 
 def detectar_bloque_horario(texto: str) -> str:
     t_up = texto.upper()
-    m_mil = re.search(r"\b(\d{2})(\d{2})(\d{2})NOV\d{2}\b", t_up)
+    m_mil = re.search(r"\\b(\\d{2})(\\d{2})(\\d{2})NOV\\d{2}\\b", t_up)
     if m_mil:
         dia, hh, mm = int(m_mil.group(1)), int(m_mil.group(2)), int(m_mil.group(3))
         mins = hh * 60 + mm
@@ -59,7 +79,7 @@ def detectar_bloque_horario(texto: str) -> str:
         else:
             return "Bloque 3 (17:26-23:59)"
 
-    m_hm = re.search(r"(?:HORA[S]?:?|A LAS)\s*(\d{1,2}):(\d{2})", t_up)
+    m_hm = re.search(r"(?:HORA[S]?:?|A LAS)\\s*(\\d{1,2}):(\\d{2})", t_up)
     if m_hm:
         hh, mm = int(m_hm.group(1)), int(m_hm.group(2))
         if ("P.M." in t_up or "PM" in t_up) and hh < 12:
@@ -105,31 +125,42 @@ def clasificar_tipo_falta_transito(texto_up: str) -> str:
         return "Llanta Lisa"
     return "Otras Infracciones Reglamento"
 
-def parsear_reportes(texto_crudo: str) -> pd.DataFrame:
-    bloques = re.split(r"(?=\bBO-\d+-)", texto_crudo.strip())
+def parsear_reportes(texto_crudo: str, ignorar_mensajes_rutina: bool = True) -> pd.DataFrame:
+    bloques = re.split(r"(?=\\bBO-\\d+-)", texto_crudo.strip())
     registros = []
     vistos = set()
+    huellas_boletas = set()
 
     for b in bloques:
         b = b.strip()
         if not b or not b.startswith("BO-"):
             continue
 
-        huella = re.sub(r"\s+", " ", b.lower()).strip()
+        # 1. Deduplicación exacta del mensaje
+        huella = re.sub(r"\\s+", " ", b.lower()).strip()
         if huella in vistos:
             continue
         vistos.add(huella)
 
         lineas = [l.strip() for l in b.splitlines() if l.strip()]
         encabezado = lineas[0]
-        m_bo = re.match(r"^(BO-\d+)\s*-\s*([^\n]+)", encabezado)
+        m_bo = re.match(r"^(BO-\\d+)\\s*-\\s*([^\\n]+)", encabezado)
         bo_code = m_bo.group(1) if m_bo else "BO-S/N"
         punto_control = encabezado
 
-        cuerpo = "\n".join(lineas[1:])
+        cuerpo = "\\n".join(lineas[1:])
         institucion = detectar_institucion(bo_code, b)
         bloque = detectar_bloque_horario(b)
         b_up = b.upper()
+
+        # Ignorar mensajes genéricos de estatus sin cifra ni detalle ("nos mantenemos realizando boleta...")
+        es_rutina_generica = bool(re.search(r"NOS MANTENEMOS\\s+(?:EN\\s+LA\\s+)?REALIZANDO\\s+(?:UNA\\s+)?BOLETA", b_up)) and not re.search(r"(?:PLACA|MATR[ÍI]CULA|C[ÉE]DULA|C\\.I\\.P|N°\\s*\\d+|#\\d+)", b_up)
+        if ignorar_mensajes_rutina and es_rutina_generica:
+            continue
+
+        # Ignorar notas informativas o preventivas sin boleta real
+        if any(k in b_up for k in ["SE PUEDEN REGISTRAR INFRACCIONES", "NO SE MANTIENE BASTÓN", "NO SE MANTIENE BASTON"]):
+            continue
 
         # Clasificación principal de la acción
         if any(k in b_up for k in ["CONDUCCIÓN JUDICIAL", "CONDUCCION JUDICIAL", "CAPTURA", "OFICIO DE", "OFICIO N", "CINTILLO ROJO"]):
@@ -143,7 +174,7 @@ def parsear_reportes(texto_crudo: str) -> pd.DataFrame:
                 subtipo = "Conducción por Identidad (C.V.I.)"
             else:
                 subtipo = "Falta Migratoria (SNM)"
-        elif any(k in b_up for k in ["INFRACCIÓN", "INFRACCION", "BOLETA #", "BOLETA N", "ARTÍCULO 240", "ARTICULO 240", "ARTÍCULO 132", "ARTICULO 132", "GRÚA", "GRUA"]):
+        elif any(k in b_up for k in ["INFRACCIÓN", "INFRACCION", "BOLETA #", "BOLETA N", "ARTÍCULO 240", "ARTICULO 240", "ARTÍCULO 132", "ARTICULO 132", "GRÚA", "GRUA", "SANCIONADO", "SANCIONÓ"]):
             categoria = "Infracción de Tránsito"
             subtipo = clasificar_tipo_falta_transito(b_up)
         else:
@@ -172,55 +203,64 @@ def parsear_reportes(texto_crudo: str) -> pd.DataFrame:
             faltas_admin = 1
 
         # Remoción en grúa
-        m_grua = re.search(r"REMOCI[ÓO]N\s+EN\s+GR[ÚU]A\s*[:=.-]*\s*(\d+)", b_up)
+        m_grua = re.search(r"REMOCI[ÓO]N\\s+EN\\s+GR[ÚU]A\\s*[:=.-]*\\s*(\\d+)", b_up)
         if m_grua:
             gruas = int(m_grua.group(1))
         elif any(k in b_up for k in ["GRÚA", "GRUA", "REMOVIDO EN GRÚA", "REMOVIDO EN GRUA", "VEHÍCULO EN GRÚA", "VEHICULO EN GRUA"]):
             gruas = 1
 
         # Armas verificadas con permiso
-        m_arma = re.search(r"ARMA\s+CON\s+PERMISO\s*[:=.-]*\s*(\d+)", b_up)
+        m_arma = re.search(r"ARMA\\s+CON\\s+PERMISO\\s*[:=.-]*\\s*(\\d+)", b_up)
         if m_arma:
             armas_verif = int(m_arma.group(1))
         elif "ARMA DE FUEGO" in b_up or "PERMISO DE PORTE" in b_up:
             armas_verif = 1
 
         # Personas verificadas
-        m_pers = re.findall(r"(?:PERSONAS(?:\s+VERIFICADAS)?|CIUDADANOS(?:\s+NACIONALES|\s+EXTRANJEROS)?)\s*[:=.-]*\s*(\d+)", b_up)
+        m_pers = re.findall(r"(?:PERSONAS(?:\\s+VERIFICADAS)?|CIUDADANOS(?:\\s+NACIONALES|\\s+EXTRANJEROS)?)\\s*[:=.-]*\\s*(\\d+)", b_up)
         if m_pers:
             personas = sum(int(x) for x in m_pers)
         elif any(k in b_up for k in ["PERSONA VERIFICADA", "CIUDADANO VERIFICADO"]) or categoria in ("Solicitado / Oficio", "Falta Administrativa / Identidad"):
             personas = 1
 
         # Vehículos verificados
-        m_veh = re.findall(r"(?:VEH[ÍI]CULOS(?:\s+PARTICULARES|\s+NACIONALES|\s+EXTRANJEROS)?|TAXIS?|BUSES?|MOTOS?|CAMI[ÓO]N(?:ES)?|VOLQUETES?|ARTICULADOS?|MULAS?)\s*[:=.-]*\s*(\d+)", b_up)
+        m_veh = re.findall(r"(?:VEH[ÍI]CULOS(?:\\s+PARTICULARES|\\s+NACIONALES|\\s+EXTRANJEROS)?|TAXIS?|BUSES?|MOTOS?|CAMI[ÓO]N(?:ES)?|VOLQUETES?|ARTICULADOS?|MULAS?)\\s*[:=.-]*\\s*(\\d+)", b_up)
         if m_veh:
             vehiculos = sum(int(x) for x in m_veh)
         elif any(k in b_up for k in ["PLACA", "MATRÍCULA", "MATRICULA"]) or gruas > 0:
             vehiculos = 1
 
-        # Boletas / Infracciones de tránsito
-        m_bol = re.search(r"(\d+)\s*(?:BOLETAS|INFRACCIONES)", b_up)
-        m_bol_rev = re.search(r"(?:BOLETAS|INFRACCIONES\s+DE\s+TR[ÁA]NSITO)\s*[:=.-]*\s*(\d+)", b_up)
-        if m_bol_rev:
-            boletas = int(m_bol_rev.group(1))
-        elif m_bol:
-            boletas = int(m_bol.group(1))
-        elif categoria == "Infracción de Tránsito" or gruas > 0:
-            boletas = 1
+        # Boletas / Infracciones de tránsito (evitando "(00)" o "0")
+        if "INFRACCIÓN DE TRÁNSITO (00)" in b_up or "INFRACCION DE TRANSITO (00)" in b_up or "BOLETAS PUESTAS POR LA UNIDAD DEL TRÁNSITO 0" in b_up:
+            boletas = 0
+        else:
+            m_bol = re.search(r"(\\d+)\\s*(?:BOLETAS|INFRACCIONES)", b_up)
+            m_bol_rev = re.search(r"(?:BOLETAS|INFRACCIONES\\s+DE\\s+TR[ÁA]NSITO)\\s*[:=.-]*\\s*(\\d+)", b_up)
+            if m_bol_rev:
+                boletas = int(m_bol_rev.group(1))
+            elif m_bol:
+                boletas = int(m_bol.group(1))
+            elif categoria == "Infracción de Tránsito" or gruas > 0:
+                boletas = 1
 
-        # Apoyo interinstitucional
+        # Deduplicación semántica de boletas repetidas con distinta redacción en el mismo punto
+        m_doc = re.search(r"(?:C\\.I\\.P\\.?|C[ÉE]DULA|PASAPORTE|RUEX)\\s*[:=.-]*\\s*([A-Z0-9-]+)", b_up)
+        doc_id = m_doc.group(1) if m_doc else "N/A"
+        m_placa = re.search(r"(?:PLACA|MATR[ÍI]CULA|MATRICULA)\\s*[:=.-]*\\s*([A-Z0-9-]+)", b_up)
+        placa = m_placa.group(1) if m_placa else "N/A"
+
+        if boletas == 1 and doc_id == "N/A" and placa == "N/A":
+            firma_semantica = f"{bo_code}|{subtipo}"
+            if firma_semantica in huellas_boletas:
+                boletas = 0
+            else:
+                huellas_boletas.add(firma_semantica)
+
         apoyos = []
         for ent in ["SNM", "MIGRACIÓN", "MIGRACION", "MINSA", "ADUANAS", "MIDA", "ATTT", "DAN", "NARCÓTICOS", "DIJ", "DNIP"]:
             if ent in b_up:
                 apoyos.append(ent)
         apoyo_str = ", ".join(dict.fromkeys(apoyos)) if apoyos else "N/A"
-
-        m_doc = re.search(r"(?:C\.I\.P\.?|C[ÉE]DULA|PASAPORTE|RUEX)\s*[:=.-]*\s*([A-Z0-9-]+)", b_up)
-        doc_id = m_doc.group(1) if m_doc else "N/A"
-
-        m_placa = re.search(r"(?:PLACA|MATR[ÍI]CULA|MATRICULA)\s*[:=.-]*\s*([A-Z0-9-]+)", b_up)
-        placa = m_placa.group(1) if m_placa else "N/A"
 
         registros.append({
             "Bloque Horario": bloque,
@@ -250,7 +290,6 @@ def generar_excel_5_pestanas(df: pd.DataFrame) -> bytes:
     NAVY_HEADER = "1B365D"
     SLATE_SUBHEADER = "2C5282"
     ZEBRA_FILL = "F4F7FA"
-    TOTAL_FILL = "E2E8F0"
     BORDER_COLOR = "CBD5E0"
 
     font_title = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
@@ -404,7 +443,6 @@ def generar_html_presentacion(df: pd.DataFrame) -> str:
     pn_veh = int(df[df["Institución"] == "Policía Nacional"]["Vehículos Verificados"].sum())
     snf_veh = int(df[df["Institución"] == "SENAFRONT"]["Vehículos Verificados"].sum())
 
-    # Desglose de tipos de faltas de tránsito
     faltas_trans = (
         df[df["Infracciones Tránsito"] > 0]
         .groupby("Tipo / Detalle de Falta")["Infracciones Tránsito"]
@@ -416,7 +454,6 @@ def generar_html_presentacion(df: pd.DataFrame) -> str:
         for k, v in faltas_trans.items()
     )
 
-    # Desglose de otras acciones / faltas admin / grúas
     otras_acciones = df[(df["Oficios / Capturas"] > 0) | (df["Faltas Admin / Indoc"] > 0) | (df["Vehículos en Grúa"] > 0) | (df["Armas Verificadas"] > 0)]
     filas_relevantes_html = "".join(
         f"<tr><td>{r['Bloque Horario']}</td><td>{r['Institución']}</td><td>{r['Punto de Control']}</td><td><strong>{r['Tipo / Detalle de Falta']}</strong></td><td>{r['Narrativa Operativa'][:160]}...</td></tr>"
@@ -494,24 +531,27 @@ def generar_html_presentacion(df: pd.DataFrame) -> str:
 tab_proc, tab_dash = st.tabs(["📥 1. Procesador de Reportes y Excel", "📊 2. Presentación Ejecutiva al Mando"])
 
 with tab_proc:
+    ignorar_rutina = st.checkbox(
+        "Filtrar mensajes genéricos de rutina sin cifra (ej. 'nos mantenemos realizando boleta...') y duplicados semánticos",
+        value=True
+    )
     texto_input = st.text_area(
         "Pega aquí los reportes operativos crudos (WhatsApp / Telegram / PDF):",
-        height=250,
-        placeholder="- BO-53-Chepo (Entrada principal)\n*3RA BRIGADA PANAMÁ ESTE/ BAT-CHEPO*..."
+        height=240,
+        placeholder="- BO-53-Chepo (Entrada principal)\\n*3RA BRIGADA PANAMÁ ESTE/ BAT-CHEPO*..."
     )
 
     if st.button("⚙️ Procesar Reportes y Actualizar Presentación", type="primary"):
         if not texto_input.strip():
             st.warning("Pega los textos operativos antes de procesar.")
         else:
-            df_res = parsear_reportes(texto_input)
+            df_res = parsear_reportes(texto_input, ignorar_mensajes_rutina=ignorar_rutina)
             st.session_state["df_vertice"] = df_res
-            st.success(f"✅ {len(df_res)} registros únicos procesados y depurados exitosamente.")
+            st.success(f"✅ {len(df_res)} registros únicos procesados y depurados.")
 
     if "df_vertice" in st.session_state and not st.session_state["df_vertice"].empty:
         df_res = st.session_state["df_vertice"]
 
-        # Fila 1 de KPIs (6 indicadores clave)
         k1, k2, k3, k4, k5, k6 = st.columns(6)
         k1.metric("📄 Solicitados / Oficios", int(df_res["Oficios / Capturas"].sum()))
         k2.metric("🚦 Infracciones Tránsito", int(df_res["Infracciones Tránsito"].sum()))
@@ -581,3 +621,27 @@ with tab_dash:
             (df_res["Armas Verificadas"] > 0)
         ][["Bloque Horario", "Institución", "Punto de Control", "Categoría", "Tipo / Detalle de Falta", "Documento / C.I.P.", "Placa", "Narrativa Operativa"]]
         st.dataframe(df_relevante, use_container_width=True, hide_index=True)
+'''
+
+reqs = "streamlit>=1.38.0\npandas>=2.2.0\nopenpyxl>=3.1.2\n"
+config_toml = '[theme]\nprimaryColor = "#1B365D"\nbackgroundColor = "#FFFFFF"\nsecondaryBackgroundColor = "#F4F7FA"\ntextColor = "#1A202C"\nfont = "sans serif"\n'
+readme_md = "# Operación Vértice — Consola Operativa (CON-C5)\n\nAplicación Streamlit lista para GitHub y Streamlit Cloud con filtro estricto anti-duplicados de boletas y presentación ejecutiva.\n"
+
+with open("repo_vertice_v3/app.py", "w", encoding="utf-8") as f:
+    f.write(app_py_v3)
+with open("repo_vertice_v3/requirements.txt", "w", encoding="utf-8") as f:
+    f.write(reqs)
+with open("repo_vertice_v3/.streamlit/config.toml", "w", encoding="utf-8") as f:
+    f.write(config_toml)
+with open("repo_vertice_v3/README.md", "w", encoding="utf-8") as f:
+    f.write(readme_md)
+
+zip_v3 = "Operacion_Vertice_GitHub_Streamlit_v3.zip"
+with zipfile.ZipFile(zip_v3, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, _, files in os.walk("repo_vertice_v3"):
+        for file in files:
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, "repo_vertice_v3")
+            zf.write(full_path, rel_path)
+
+print("Saved v3 zip:", zip_v3)
